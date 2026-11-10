@@ -176,6 +176,25 @@ func TestTwoProbes(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
+	// Win32.foksDir (client/libclient/home.go:406) reads %LocalAppData%
+	// directly and ignores --home/getHome() for every state directory
+	// (cache, config, data, runtime, log, service-spawn); only the unused
+	// Win32.Home() honors an override. Without this, every test process on
+	// Windows shares one real %LocalAppData%\foks\ (secrets, sqlite DBs, the
+	// agent socket, logs) regardless of each test's own --home, which both
+	// leaks "existing users" across unrelated test runs and lets unrelated
+	// processes race the same agent socket. Posix/Darwin are unaffected
+	// (XdgPosix honors a nonstandard home; Darwin builds every path from
+	// Home()), so this is a Windows-only test-isolation gap, worked around
+	// here rather than patched in the vendored submodule without
+	// coordination. See docs/01-backend-options.md.
+	localAppData, err := os.MkdirTemp("", "foks_test_localappdata_")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("LocalAppData", localAppData)
+	tmpDirs = append(tmpDirs, localAppData)
+
 	setup()
 	code := m.Run()
 	shutdown()

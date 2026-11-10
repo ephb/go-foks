@@ -5,8 +5,10 @@ package cli
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/foks-proj/go-foks/client/libclient"
 	"github.com/foks-proj/go-foks/lib/core"
@@ -764,4 +766,178 @@ func TestRTOfflineCLIWalkthrough(t *testing.T) {
 	require.Len(t, thread.Pending, 0)
 	require.Equal(t, "written offline", string(thread.Msgs[0].Body))
 	require.Equal(t, proto.RTMsgSeq(2), thread.Msgs[0].Seq)
+}
+
+// TestRTOutboxRetryIdempotent exercises the CLIENT-SIDE half of retry safety
+// only: RetryOutbox looks an entry up by msgID and fails with RowNotFoundError
+// once that row is gone, so a second retry after a successful drain cannot
+// re-send through the outbox path. It does NOT exercise server-side msgID
+// deduplication (messages_enc's msg_id unique constraint plus loadReplay in
+// server/realtime/messages.go, which resolves the idempotency contract even
+// when a local outbox row is still present -- the "server accepted, ack
+// lost" case this test cannot reach without a test hook that resends the same
+// msgID with the local row intact). See docs/01-backend-options.md for that
+// mechanism, documented from source instead of exercised here.
+func TestRTOutboxRetryIdempotent(t *testing.T) {
+	bob := makeBobAndHisAgent(t)
+	b := bob.agent
+	defer b.stop(t)
+
+	merklePoke(t)
+	merklePoke(t)
+
+	tm := "t-" + strings.ToLower(fsRandomString(t, 8))
+	var teamRes lcl.TeamCreateRes
+	b.runCmdToJSON(t, &teamRes, "team", "create", tm)
+	merklePoke(t)
+	b.runCmd(t, nil, "rt", "new-channel", "-t", tm,
+		"--name", "foo", "--description", "the foo channel")
+
+	// Prime the local channel-set cache with one online send before ever
+	// going offline (matches TestRTOfflineCLIWalkthrough). Cold-start offline
+	// resolution of a channel by name reads a verified local snapshot; a
+	// channel created moments ago and never touched online is not yet in
+	// that snapshot, so an immediate offline send resolves nothing and fails
+	// with "not found: channel" -- not a product bug, a sequencing bug in an
+	// earlier version of this test.
+	b.runCmd(t, nil, "rt", "send", "-t", tm, "--channel", "foo", "sent while online")
+
+	restartAgent := func(networkDead bool) {
+		b.stop(t)
+		b.opts.killNetwork = networkDead
+		b.setFlags(t)
+		b.runAgent(t)
+	}
+
+	// Go offline and queue one message. A queued (as opposed to delivered)
+	// send is a structured soft-failure, not an error, so capture its msgID
+	// from the JSON-rendered RTMsgQueuedError rather than scraping text.
+	restartAgent(true)
+	var qerr core.RTMsgQueuedError
+	b.runCmdToJSON(t, &qerr, "rt", "send", "-t", tm, "--channel", "foo", "retry me once")
+	require.False(t, qerr.MsgID.IsZero())
+	msgIDStr, err := qerr.MsgID.StringErr()
+	require.NoError(t, err)
+
+	// Retry while still offline: RetryOutbox re-queues the entry and attempts
+	// an immediate drain, which fails against the dead network. The CLI
+	// command itself must still exit cleanly, and the entry must remain
+	// queued -- not duplicated, not dropped.
+	b.runCmd(t, nil, "rt", "outbox", "retry", msgIDStr)
+	require.Contains(t, string(b.runCmdToBytes(t, "rt", "outbox", "ls")), "queued")
+
+	// Back online: a second explicit retry races normal reconnect delivery
+	// (the agent's own inbox sync may drain the entry first). Either order is
+	// fine; what must hold is the outcome below, not this call's own exit
+	// status, so its error (if any, e.g. the entry already having drained) is
+	// deliberately not asserted on.
+	restartAgent(false)
+	b.runCmd(t, nil, "team", "inbox", tm)
+	_ = b.runCmdErr(nil, "rt", "outbox", "retry", msgIDStr)
+
+	// Converge: exactly one copy of the message ever reached the channel,
+	// nothing is left pending, and the outbox is empty.
+	require.Contains(t, string(b.runCmdToBytes(t, "rt", "outbox", "ls")), "outbox is empty")
+	var thread lcl.RTThreadView
+	b.runCmdToJSON(t, &thread, "rt", "read", "-t", tm, "--channel", "foo")
+	require.False(t, thread.Stale)
+	require.Len(t, thread.Pending, 0)
+	matches := 0
+	for _, msg := range thread.Msgs {
+		if string(msg.Body) == "retry me once" {
+			matches++
+		}
+	}
+	require.Equal(t, 1, matches, "exactly one delivered copy of the retried message, no duplicates")
+}
+
+// TestRTStandaloneCLIExchange proves the iOS-relevant path specifically:
+// --standalone (config.go:268, equivalent to Config.SetStandalone) runs the
+// full agent in-process for the lifetime of one cmd.MainInner call, with no
+// socket-connected daemon at all. Each call below is a separate invocation
+// against the same --home, simulating one short-lived process launch per
+// operation -- the closest this test suite comes to the iOS c-archive model,
+// minus the long-lived embedding itself. newTestAgent's cfgFlags are reused
+// directly (never through runAgent/stop): there is no background agent to
+// start or stop, and `ctl` subcommands assume a socket-connected daemon
+// (agent.StartupOpts{NoStandalone: true}) that never exists here.
+func TestRTStandaloneCLIExchange(t *testing.T) {
+	a := newTestAgent(t)
+	a.cfgFlags = append([]string{"-s"}, a.cfgFlags...)
+	t.Logf("DIAG cfgFlags=%v", a.cfgFlags)
+
+	signupUI := (&mockSignupUI{}).withDeviceKey()
+	a.runCmdWithUIs(t,
+		libclient.UIs{Signup: signupUI, Terminal: &terminalUI{}},
+		"--simple-ui", "signup")
+	require.Len(t, signupUI.promptSet, 1)
+	require.Equal(t, signupUI.promptSet[0], "🆕 Go ahead and create a new user.")
+
+	tm := "t-" + strings.ToLower(fsRandomString(t, 8))
+	var teamRes lcl.TeamCreateRes
+	a.runCmdToJSON(t, &teamRes, "team", "create", tm)
+	merklePoke(t)
+	a.runCmd(t, nil, "rt", "new-channel", "-t", tm,
+		"--name", "foo", "--description", "the foo channel")
+	a.runCmd(t, nil, "rt", "send", "-t", tm, "--channel", "foo",
+		"hello from a fresh standalone invocation")
+
+	var thread lcl.RTThreadView
+	a.runCmdToJSON(t, &thread, "rt", "read", "-t", tm, "--channel", "foo")
+	require.Len(t, thread.Msgs, 1)
+	require.Equal(t, "hello from a fresh standalone invocation", string(thread.Msgs[0].Body))
+	require.False(t, thread.Stale)
+	require.Len(t, thread.Pending, 0)
+}
+
+// TestRTAgentStartupDiag is a diagnostic, not a product assertion. It
+// replicates runAgent's socket-wait (base_test.go), but with a real 30s
+// deadline instead of the ~1.86s the fixed 20-iteration backoff budget
+// amounts to, and it surfaces the agent process's own error, if the agent
+// command returns one, in the failure message rather than only logging it
+// separately. The goal is to tell two failure modes apart: a slow-starting
+// agent under host resource pressure (connects late, well under 30s) from a
+// genuinely broken agent startup (never connects, or returns an error). This
+// test intentionally does not touch base_test.go's shared helpers or their
+// budget, which other tests may depend on staying tight.
+func TestRTAgentStartupDiag(t *testing.T) {
+	a := newTestAgent(t)
+	sock := a.socketPath(t)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- a.runCmdErr(func(m libclient.MetaContext) error {
+			a.g = m.G()
+			return nil
+		}, "agent")
+	}()
+
+	start := time.Now()
+	deadline := start.Add(30 * time.Second)
+	wait := time.Millisecond
+	var lastDialErr error
+	for {
+		conn, dialErr := net.DialTimeout("unix", sock, 200*time.Millisecond)
+		if dialErr == nil {
+			_ = conn.Close()
+			t.Logf("agent socket reachable after %s", time.Since(start))
+			return
+		}
+		lastDialErr = dialErr
+		select {
+		case agentErr := <-errCh:
+			t.Fatalf("agent process exited before its socket came up (after %s): %v",
+				time.Since(start), agentErr)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("agent socket not reachable after a real 30s deadline; "+
+				"no agent-process error observed (still running or blocked); last dial error: %v",
+				lastDialErr)
+		}
+		time.Sleep(wait)
+		if wait < 200*time.Millisecond {
+			wait *= 2
+		}
+	}
 }
