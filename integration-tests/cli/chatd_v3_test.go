@@ -43,6 +43,9 @@ type chatdFrame struct {
 type chatdClient struct {
 	t      *testing.T
 	conn   net.Conn
+	// addr and tokenFile let other clients (the kb CLI) reach this chatd.
+	addr      string
+	tokenFile string
 	nextID int64
 	resps  chan chatdFrame
 	events chan chatdFrame
@@ -111,7 +114,7 @@ func startChatdFresh(t *testing.T, cfgFlags []string) *chatdClient {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	c := &chatdClient{t: t, conn: conn, resps: make(chan chatdFrame, 16), events: make(chan chatdFrame, 256)}
+	c := &chatdClient{t: t, conn: conn, addr: addr, tokenFile: tokenFile, resps: make(chan chatdFrame, 16), events: make(chan chatdFrame, 256)}
 	go func() {
 		for {
 			b, err := wire.ReadFrame(conn)
