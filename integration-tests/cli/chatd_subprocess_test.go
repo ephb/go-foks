@@ -38,7 +38,7 @@ import (
 //     standalone FOKS instance talks to the test server and unlocks the
 //     persisted active user on startup.
 //  3. Connects over TCP loopback (same framing as Unix socket), completes the
-//     WIRE.md v2 hello handshake with the token chatd wrote, and exercises
+//     WIRE.md hello handshake with the token chatd wrote, and exercises
 //     authenticated WIRE.md operations (list_existing_users, make_channel,
 //     send, get_thread_view, sync_inbox, inbox_view) against the running
 //     chatd subprocess.
@@ -111,7 +111,7 @@ func TestChatdSubprocessAuthenticatedExchange(t *testing.T) {
 			rawParams = b
 		}
 		reqBytes, err := json.Marshal(wire.Request{
-			V:      2,
+			V:      3,
 			ID:     nextID,
 			Op:     op,
 			Params: rawParams,
@@ -123,7 +123,7 @@ func TestChatdSubprocessAuthenticatedExchange(t *testing.T) {
 		require.NoError(t, err)
 		var resp wire.Response
 		require.NoError(t, json.Unmarshal(respBytes, &resp))
-		require.Equal(t, 2, resp.V)
+		require.Equal(t, 3, resp.V)
 		require.Equal(t, nextID, resp.ID)
 		return resp
 	}

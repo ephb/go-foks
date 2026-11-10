@@ -28,8 +28,10 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/lib/team"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
@@ -261,7 +263,7 @@ func TestChatdWireSocketRoundTrip(t *testing.T) {
 			rawParams = b
 		}
 		reqBytes, err := json.Marshal(wire.Request{
-			V:      2,
+			V:      3,
 			ID:     nextID,
 			Op:     op,
 			Params: rawParams,
@@ -273,7 +275,7 @@ func TestChatdWireSocketRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 		var resp wire.Response
 		require.NoError(t, json.Unmarshal(respBytes, &resp))
-		require.Equal(t, 2, resp.V)
+		require.Equal(t, 3, resp.V)
 		require.Equal(t, nextID, resp.ID)
 		return resp
 	}
@@ -446,10 +448,81 @@ func TestChatdWireSocketRoundTrip(t *testing.T) {
 	require.NotNil(t, discResp.Error)
 	require.Equal(t, "row_not_found", discResp.Error.Code)
 
-	// 9. run_signup -> rejected
+	// 9. run_signup was removed in wire v3 (signup is a session now).
 	suResp := call("run_signup", nil)
 	require.False(t, suResp.OK)
 	require.NotNil(t, suResp.Error)
-	require.Equal(t, "rejected", suResp.Error.Code)
+	require.Equal(t, "invalid_input", suResp.Error.Code)
+
+	// 10. status reports the rig's active, unlocked user.
+	stResp := call("status", nil)
+	require.True(t, stResp.OK, "status failed: %+v", stResp.Error)
+	var stRes struct {
+		WireVersion int `json:"wire_version"`
+		User        *struct {
+			Username string `json:"username"`
+			Unlocked bool   `json:"unlocked"`
+		} `json:"user"`
+	}
+	require.NoError(t, json.Unmarshal(stResp.Result, &stRes))
+	require.Equal(t, 3, stRes.WireVersion)
+	require.NotNil(t, stRes.User)
+	require.NotEmpty(t, stRes.User.Username)
+	require.True(t, stRes.User.Unlocked)
+}
+
+// TestShimAdapterTeams drives the v3 team operations through the adapter
+// against the rig: create, list, roster, invite, and the taken-name error.
+func TestShimAdapterTeams(t *testing.T) {
+	r := makeRTOutboxTestRig(t)
+	ctx := r.mb.Ctx()
+	sh, err := shim.NewAdapter(r.mb.Base().G())
+	require.NoError(t, err)
+
+	st, err := sh.Status(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, st)
+	require.True(t, st.Unlocked)
+
+	rnd, err := core.RandomBase36String(6)
+	require.NoError(t, err)
+	name := "shimteam" + strings.ToLower(rnd)
+	fqs, err := sh.CreateTeam(ctx, proto.NameUtf8(name))
+	require.NoError(t, err)
+	require.Equal(t, proto.FQTeamString(name), fqs)
+	r.tew.DirectDoubleMerklePokeInTest(t)
+
+	// A taken name is core.NameInUseError, classified bad_args.
+	_, err = sh.CreateTeam(ctx, proto.NameUtf8(name))
+	require.Error(t, err)
+	code, ok := shim.Classify(err)
+	require.True(t, ok)
+	require.Equal(t, shim.ErrBadArgs, code, "err=%v (%T)", err, err)
+
+	teams, err := sh.ListTeams(ctx)
+	require.NoError(t, err)
+	var found *shim.TeamMembership
+	for i := range teams {
+		if teams[i].Team == fqs {
+			found = &teams[i]
+		}
+	}
+	require.NotNil(t, found, "new team missing from %+v", teams)
+	typ, err := found.Role.GetT()
+	require.NoError(t, err)
+	require.Equal(t, proto.RoleType_OWNER, typ)
+
+	parsed, err := core.ParseFQTeam(fqs)
+	require.NoError(t, err)
+	members, err := sh.TeamMembers(ctx, *parsed)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	require.Equal(t, st.Username, members[0].Name)
+	require.False(t, members[0].IsTeam)
+
+	code1, err := sh.CreateTeamInvite(ctx, *parsed)
+	require.NoError(t, err)
+	_, err = team.ImportTeamInvite(code1)
+	require.NoError(t, err)
 }
 
