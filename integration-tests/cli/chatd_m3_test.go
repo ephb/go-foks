@@ -153,6 +153,7 @@ func TestChatdM3(t *testing.T) {
 	t.Run("DisplayNames", r.displayNames)
 	t.Run("RepliesReactionsEditsDeletes", r.typedMessages)
 	t.Run("Channels", r.channels)
+	t.Run("InvitesAndJoins", r.invitesAndJoins)
 }
 
 // displayNames: a DM with bob is listed with bob's name as he typed it
@@ -512,4 +513,117 @@ func (r *m3Rig) channels(t *testing.T) {
 	t.Logf("kb rename as a member: %s", b)
 	require.Contains(t, string(b), "only team admins")
 	r.kb(t, r.alice, "chat", "channel", "unarchive", teamNm, "bobs")
+}
+
+type m3JoinRequest struct {
+	RSVP string         `json:"rsvp"`
+	Name string         `json:"name"`
+	Host string         `json:"host"`
+	Role map[string]any `json:"role"`
+	Time int64          `json:"time"`
+}
+
+func joinRequests(c *chatdClient, team map[string]any) []m3JoinRequest {
+	var res struct {
+		Requests []m3JoinRequest `json:"requests"`
+	}
+	c.ok("team_join_requests", map[string]any{"team": team}, &res)
+	return res.Requests
+}
+
+func memberOf(c *chatdClient, team string) bool {
+	var teams struct {
+		Teams []struct {
+			Team map[string]string `json:"team"`
+		} `json:"teams"`
+	}
+	c.ok("list_teams", nil, &teams)
+	for _, tm := range teams.Teams {
+		if strings.EqualFold(tm.Team["value"], team) {
+			return true
+		}
+	}
+	return false
+}
+
+// invitesAndJoins: alice invites, bob accepts (a join request), alice lists
+// and admits it over the wire; bob is then a member. A second round goes
+// through kb (team invite / accept / requests / admit --all).
+func (r *m3Rig) invitesAndJoins(t *testing.T) {
+	teamNm := "Inv_" + r.rnd
+	var created struct {
+		Team map[string]any `json:"team"`
+	}
+	r.alice.ok("create_team", map[string]any{"name": teamNm}, &created)
+	team := created.Team
+	merklePoke(t)
+	require.Empty(t, joinRequests(r.alice, team))
+
+	var inv struct {
+		Code string `json:"code"`
+	}
+	r.alice.ok("create_team_invite", map[string]any{"team": team}, &inv)
+	var accepted struct {
+		Team map[string]string `json:"team"`
+	}
+	r.bob.ok("accept_team_invite", map[string]any{"code": inv.Code}, &accepted)
+	require.Equal(t, teamNm, accepted.Team["value"])
+	merklePoke(t)
+	require.False(t, memberOf(r.bob, teamNm), "accepting only files a request")
+
+	reqs := joinRequests(r.alice, team)
+	t.Logf("join requests: %+v", reqs)
+	require.Len(t, reqs, 1)
+	require.Equal(t, r.bobNm, reqs[0].Name, "the requester as typed")
+	require.Empty(t, reqs[0].Host, "same host")
+	require.NotEmpty(t, reqs[0].RSVP)
+	require.NotZero(t, reqs[0].Time)
+
+	// Only admins see and admit requests.
+	f := r.bob.call("team_join_requests", map[string]any{"team": team})
+	t.Logf("join requests as a non-member: ok=%v %+v", f.OK, f.Error)
+	require.False(t, f.OK)
+
+	r.alice.ok("team_admit", map[string]any{"team": team, "requests": []map[string]any{{"rsvp": reqs[0].RSVP}}}, nil)
+	merklePoke(t)
+	require.Empty(t, joinRequests(r.alice, team), "admitted requests leave the list")
+	var members struct {
+		Members []struct {
+			Name string         `json:"name"`
+			Role map[string]any `json:"role"`
+		} `json:"members"`
+	}
+	r.alice.ok("team_members", map[string]any{"team": team}, &members)
+	roles := map[string]string{}
+	for _, m := range members.Members {
+		roles[strings.ToLower(m.Name)] = m.Role["kind"].(string)
+	}
+	require.Equal(t, "member", roles[strings.ToLower(r.bobNm)], "%+v", members)
+	require.True(t, memberOf(r.bob, teamNm))
+	// bob, now a member, reads the default channel.
+	r.alice.ok("send", map[string]any{"team": team, "app": 1, "channel": map[string]any{"kind": "default"}, "body": "welcome bob"}, nil)
+	merklePoke(t)
+	msgs := threadMsgs(r.bob, team, map[string]any{"kind": "default"})
+	require.Len(t, msgs, 1)
+	require.Equal(t, "welcome bob", msgs[0].Body)
+
+	if r.kbBin == "" {
+		return
+	}
+	team2 := "Inv2_" + r.rnd
+	r.kb(t, r.alice, "team", "create", team2)
+	merklePoke(t)
+	code := strings.TrimSpace(r.kb(t, r.alice, "team", "invite", team2))
+	out := r.kb(t, r.bob, "team", "accept", code)
+	require.Contains(t, out, "kb team admit")
+	merklePoke(t)
+	out = r.kb(t, r.alice, "team", "requests", team2)
+	t.Logf("kb team requests:\n%s", out)
+	require.Contains(t, out, r.bobNm+"\tuser\t")
+	out = r.kb(t, r.alice, "team", "admit", team2, "--all")
+	require.Contains(t, out, "Admitted "+r.bobNm+" to "+team2+".")
+	merklePoke(t)
+	require.True(t, memberOf(r.bob, team2))
+	out = r.kb(t, r.alice, "team", "requests", team2)
+	require.Contains(t, out, "No pending requests")
 }
