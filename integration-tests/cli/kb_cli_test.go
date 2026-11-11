@@ -155,3 +155,121 @@ func TestKbCLIAgainstChatd(t *testing.T) {
 	bob.runCmdToJSON(t, &thread, "rt", "read", "--adhoc", aliceName)
 	require.Contains(t, threadBodies(thread), "sent via kb chat api")
 }
+
+// kbRunCode runs the kb CLI against chatd c and returns stdout, stderr and
+// the exit code, without failing the test on a non-zero exit.
+func kbRunCode(t *testing.T, bin string, c *chatdClient, stdin string, args ...string) (string, string, int) {
+	t.Helper()
+	cmd := exec.Command(bin, append([]string{"--no-autostart"}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"KB_CHATD_SOCKET=tcp://"+c.addr,
+		"KB_CHATD_TOKEN_FILE="+c.tokenFile,
+	)
+	cmd.Stdin = strings.NewReader(stdin)
+	var out, errOut strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		require.True(t, ok, "kb %v: %v", args, err)
+		code = exitErr.ExitCode()
+	}
+	return out.String(), errOut.String(), code
+}
+
+// TestKbCLILogin drives kb login/unlock/logout/status against a chatd with
+// two accounts, one of them passphrase-protected (FOKS passphrase key
+// storage), across a chatd restart.
+func TestKbCLILogin(t *testing.T) {
+	bin := os.Getenv("KB_BIN")
+	if bin == "" {
+		t.Skip("set KB_BIN to the kb CLI binary to run this test")
+	}
+	stopper := runMerkleActivePoker(t)
+	defer stopper()
+	vh := vHost(t, 4)
+
+	cfg := newTestAgentWithOpts(t, agentOpts{defaultKeyEncryptionMode: "passphrase"})
+	home := t.TempDir()
+	c := startChatdAt(t, cfg.cfgFlags, home)
+	rnd := strings.ToLower(fsRandomString(t, 6))
+	alice, bob := "alice_"+rnd, "bob_"+rnd
+	pp := "kb-pp-" + rnd
+
+	// Nothing yet: exit 5, "kb signup".
+	out, _, code := kbRunCode(t, bin, c, "", "status")
+	require.Equal(t, 5, code, "kb status on an empty home: %s", out)
+	require.Contains(t, out, "run `kb signup`")
+
+	c.signupPassphrase = pp
+	c.signupOverWire(vh.Addr, alice, "kb device")
+	merklePoke(t)
+	c.signupPassphrase = "" // bob has no passphrase
+	c.signupOverWire(vh.Addr, bob, "kb device")
+	merklePoke(t)
+
+	out = kbRun(t, bin, c, "", "status")
+	require.Contains(t, out, "user:    "+bob+"@")
+
+	// kb logout; kb status lists both accounts, exit 5.
+	out = kbRun(t, bin, c, "", "logout")
+	require.Contains(t, out, "Logged out "+bob)
+	out, _, code = kbRunCode(t, bin, c, "", "status")
+	require.Equal(t, 5, code, "kb status logged out: %s", out)
+	require.Contains(t, out, "logged out")
+	require.Contains(t, out, alice+"@")
+	require.Contains(t, out, bob+"@")
+	_, errOut, code := kbRunCode(t, bin, c, "", "team", "ls")
+	require.Equal(t, 5, code)
+	require.Contains(t, errOut, "kb login")
+
+	// kb login alice with a wrong passphrase: exit 1, alice active and
+	// locked (exit 8).
+	_, errOut, code = kbRunCode(t, bin, c, "wrong\n", "login", alice, "--passphrase-stdin")
+	require.Equal(t, 1, code, "wrong passphrase: %s", errOut)
+	require.Contains(t, errOut, "wrong passphrase")
+	require.NotContains(t, errOut, pp)
+	out, _, code = kbRunCode(t, bin, c, "", "status")
+	require.Equal(t, 8, code, "locked: %s", out)
+	require.Contains(t, out, "locked:  passphrase - run `kb unlock`")
+	_, errOut, code = kbRunCode(t, bin, c, "", "chat", "ls")
+	require.Equal(t, 8, code, "chat ls while locked: %s", errOut)
+
+	// Without --passphrase-stdin and without a terminal, kb refuses.
+	_, errOut, code = kbRunCode(t, bin, c, pp+"\n", "unlock")
+	require.NotEqual(t, 0, code)
+	require.Contains(t, errOut, "--passphrase-stdin")
+
+	out = kbRun(t, bin, c, pp+"\n", "unlock", "--passphrase-stdin")
+	require.Contains(t, out, "Unlocked "+alice)
+	out = kbRun(t, bin, c, "", "status")
+	require.Contains(t, out, "user:    "+alice+"@")
+	kbRun(t, bin, c, "", "team", "ls")
+
+	// Switch to bob by number (two accounts listed): no passphrase.
+	_, _, code = kbRunCode(t, bin, c, "", "login", "carol_"+rnd)
+	require.Equal(t, 1, code)
+	out = kbRun(t, bin, c, "", "login", bob)
+	require.Contains(t, out, "Logged in as "+bob)
+
+	// Restart chatd: bob (no passphrase) comes back unlocked; alice needs
+	// her passphrase again, chosen from the list this time.
+	c.stop()
+	c = startChatdAt(t, cfg.cfgFlags, home)
+	out = kbRun(t, bin, c, "", "status")
+	require.Contains(t, out, "user:    "+bob+"@")
+	kbRun(t, bin, c, "", "logout")
+	// alice is listed first or second; find her number in the prompt.
+	_, errOut, _ = kbRunCode(t, bin, c, "", "login")
+	n := "1"
+	if strings.Index(errOut, alice) > strings.Index(errOut, bob) {
+		n = "2"
+	}
+	out = kbRun(t, bin, c, n+"\n"+pp+"\n", "login", "--passphrase-stdin")
+	require.Contains(t, out, "Logged in as "+alice+"@")
+	require.Contains(t, out, "(unlocked)")
+	out = kbRun(t, bin, c, "", "status")
+	require.NotContains(t, out, "locked:")
+}

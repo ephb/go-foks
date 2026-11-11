@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,6 +47,10 @@ type chatdClient struct {
 	// addr and tokenFile let other clients (the kb CLI) reach this chatd.
 	addr      string
 	tokenFile string
+	// signupPassphrase answers signup's passphrase prompts ("" = none).
+	signupPassphrase string
+	// stop kills this chatd (also done at cleanup).
+	stop   func()
 	nextID int64
 	resps  chan chatdFrame
 	events chan chatdFrame
@@ -67,6 +72,12 @@ func buildChatd(t *testing.T) string {
 // so it shares nothing with the in-process test agents. It returns an
 // authenticated v3 client.
 func startChatdFresh(t *testing.T, cfgFlags []string) *chatdClient {
+	return startChatdAt(t, cfgFlags, t.TempDir())
+}
+
+// startChatdAt starts chatd with its FOKS home (LocalAppData) under dir,
+// so a later call with the same dir restarts it on the same home.
+func startChatdAt(t *testing.T, cfgFlags []string, dir string) *chatdClient {
 	bin := buildChatd(t)
 
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
@@ -74,7 +85,6 @@ func startChatdFresh(t *testing.T, cfgFlags []string) *chatdClient {
 	addr := probe.Addr().String()
 	require.NoError(t, probe.Close())
 
-	dir := t.TempDir()
 	tokenFile := filepath.Join(dir, "chatd.token")
 	appData := filepath.Join(dir, "localappdata")
 	require.NoError(t, os.MkdirAll(appData, 0o700))
@@ -83,15 +93,21 @@ func startChatdFresh(t *testing.T, cfgFlags []string) *chatdClient {
 		"-token-file", tokenFile, "--"}, cfgFlags...)
 	proc := exec.Command(bin, args...)
 	proc.Env = append(os.Environ(), "LocalAppData="+appData, "LOCALAPPDATA="+appData)
-	logFile, err := os.Create(filepath.Join(dir, "chatd.log"))
+	logFile, err := os.OpenFile(filepath.Join(dir, "chatd.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	require.NoError(t, err)
 	proc.Stdout = logFile
 	proc.Stderr = logFile
 	require.NoError(t, proc.Start())
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			_ = proc.Process.Kill()
+			_, _ = proc.Process.Wait()
+			_ = logFile.Close()
+		})
+	}
 	t.Cleanup(func() {
-		_ = proc.Process.Kill()
-		_, _ = proc.Process.Wait()
-		_ = logFile.Close()
+		stop()
 		if t.Failed() {
 			if b, err := os.ReadFile(logFile.Name()); err == nil {
 				t.Logf("chatd log:\n%s", b)
@@ -99,6 +115,14 @@ func startChatdFresh(t *testing.T, cfgFlags []string) *chatdClient {
 		}
 	})
 
+	c := dialChatd(t, addr, tokenFile)
+	c.stop = stop
+	return c
+}
+
+// dialChatd connects to a running chatd and says hello. The connection
+// closes at cleanup, or with c.close().
+func dialChatd(t *testing.T, addr, tokenFile string) *chatdClient {
 	var conn net.Conn
 	deadline := time.Now().Add(30 * time.Second)
 	for {
@@ -114,7 +138,7 @@ func startChatdFresh(t *testing.T, cfgFlags []string) *chatdClient {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	c := &chatdClient{t: t, conn: conn, addr: addr, tokenFile: tokenFile, resps: make(chan chatdFrame, 16), events: make(chan chatdFrame, 256)}
+	c := &chatdClient{t: t, conn: conn, addr: addr, tokenFile: tokenFile, stop: func() {}, resps: make(chan chatdFrame, 16), events: make(chan chatdFrame, 256)}
 	go func() {
 		for {
 			b, err := wire.ReadFrame(conn)
@@ -252,7 +276,7 @@ func (c *chatdClient) signupOverWire(server proto.TCPAddr, username, device stri
 			case "device_name":
 				ans["value"] = device
 			case "passphrase":
-				ans["value"] = "" // no passphrase, like mockSignupUI
+				ans["value"] = c.signupPassphrase // "": none, like mockSignupUI
 			case "pick_existing_user":
 				ans["choice"] = -1
 			default:

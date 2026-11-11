@@ -32,9 +32,16 @@
 //	bob-read-dm    body "alice": bob reads the DM; the thread JSON goes to .out
 //	bob-read-team  body "team": same for a team's default channel
 //	bob-teams      bob lists his team memberships (.out)
+//	signup         body "name\npassphrase": sign an account up on alice's
+//	               chatd over the wire (empty passphrase: none), leaving it
+//	               the active user; for login/unlock screens
+//	logout         log alice's chatd out over the wire
 //	done           tear everything down and pass
 //
-// The rig gives up after KB_GUI_HOLD_MINUTES (default 60).
+// The rig gives up after KB_GUI_HOLD_MINUTES (default 60). With
+// KB_GUI_HOLD_ENC=passphrase, chatd stores device keys encrypted with the
+// signup passphrase (--local-keyring-default-encryption-mode), so after a
+// stop/start the active user is locked until unlocked.
 
 package cli
 
@@ -144,7 +151,9 @@ func TestKbGUIHold(t *testing.T) {
 
 	// alice: chatd on an empty home of its own (as startChatdFresh), but no
 	// client here: kb-gui does the hello, signup and everything else.
-	aliceCfg := newTestAgent(t)
+	aliceCfg := newTestAgentWithOpts(t, agentOpts{
+		defaultKeyEncryptionMode: os.Getenv("KB_GUI_HOLD_ENC"),
+	})
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	addr := probe.Addr().String()
@@ -220,6 +229,21 @@ func TestKbGUIHold(t *testing.T) {
 		if body, ok := take("bob-read-team"); ok {
 			out, err := holdJSON(bob, "rt", "read", "-t", body)
 			result("bob-read-team", fmt.Sprintf("err=%v\n%s", err, out))
+		}
+		if body, ok := take("signup"); ok {
+			name, pp := two(body)
+			c := dialChatd(t, addr, h.tokenFile)
+			c.signupPassphrase = pp
+			c.signupOverWire(vh.Addr, name, "kb-gui rig")
+			c.close()
+			merklePoke(t)
+			result("signup", "signed up "+name)
+		}
+		if _, ok := take("logout"); ok {
+			c := dialChatd(t, addr, h.tokenFile)
+			f := c.call("logout", nil)
+			c.close()
+			result("logout", fmt.Sprintf("ok=%v err=%+v", f.OK, f.Error))
 		}
 		if _, ok := take("bob-teams"); ok {
 			out, err := holdJSON(bob, "team", "list-memberships")
