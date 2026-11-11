@@ -36,6 +36,10 @@
 //	               chatd over the wire (empty passphrase: none), leaving it
 //	               the active user; for login/unlock screens
 //	logout         log alice's chatd out over the wire
+//	bob-chatd      body "name": start a second chatd and sign "name" up on
+//	               it; .out has its KB_CHATD_SOCKET and KB_CHATD_TOKEN_FILE,
+//	               for driving that user with the kb CLI
+//	poke           a merkle poke (after team changes)
 //	done           tear everything down and pass
 //
 // The rig gives up after KB_GUI_HOLD_MINUTES (default 60). With
@@ -244,6 +248,19 @@ func TestKbGUIHold(t *testing.T) {
 			f := c.call("logout", nil)
 			c.close()
 			result("logout", fmt.Sprintf("ok=%v err=%+v", f.OK, f.Error))
+		}
+		if body, ok := take("bob-chatd"); ok {
+			// A second chatd ("bob2", any name), signed up over the wire, for
+			// driving the other side with the kb CLI (reactions, invites).
+			bobCfg := newTestAgent(t)
+			b := startChatdAt(t, bobCfg.cfgFlags, t.TempDir())
+			b.signupOverWire(vh.Addr, body, "rig bob2")
+			merklePoke(t)
+			result("bob-chatd", fmt.Sprintf("KB_CHATD_SOCKET=tcp://%s\nKB_CHATD_TOKEN_FILE=%s", b.addr, b.tokenFile))
+		}
+		if _, ok := take("poke"); ok {
+			merklePoke(t)
+			result("poke", "ok")
 		}
 		if _, ok := take("bob-teams"); ok {
 			out, err := holdJSON(bob, "team", "list-memberships")
