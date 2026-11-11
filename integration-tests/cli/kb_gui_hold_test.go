@@ -17,7 +17,7 @@
 //
 //	KB_CHATD_SOCKET=tcp://127.0.0.1:port
 //	KB_CHATD_TOKEN_FILE=...
-//	SERVER=<vhost probe address to type into the signup screen>
+//	SERVER=<vhost probe address; chatd offers it as the signup default>
 //	INVITE=<a multi-use invite code>
 //	BOB=<bob's username>
 //	CHATD_LOG=...
@@ -174,7 +174,7 @@ func TestKbGUIHold(t *testing.T) {
 		env:       append(os.Environ(), "LocalAppData="+appData, "LOCALAPPDATA="+appData),
 	}
 	h.args = append([]string{"-insecure-dev-tcp", "-socket", "tcp://" + addr,
-		"-token-file", h.tokenFile, "--"}, aliceCfg.cfgFlags...)
+		"-token-file", h.tokenFile, "-signup-server", string(vh.Addr), "--"}, aliceCfg.cfgFlags...)
 	h.start()
 	defer h.stop()
 
