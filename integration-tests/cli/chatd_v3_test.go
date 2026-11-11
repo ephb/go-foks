@@ -399,6 +399,28 @@ func TestChatdV3SignupTeamsAndDM(t *testing.T) {
 	}
 	require.Equal(t, map[string]string{aliceName: "owner", bobName: "member"}, names)
 
+	// The default channel create_team made is for every member, not only
+	// the owner (it once inherited the creator's owner role): bob, a
+	// member, reads a message alice sends there.
+	var chans struct {
+		Channels []struct {
+			Tier  string `json:"tier"`
+			Roles struct {
+				Read map[string]any `json:"read"`
+			} `json:"roles"`
+		} `json:"channels"`
+	}
+	c.ok("list_channels_for_team", map[string]any{"team": teamParam, "app": 1}, &chans)
+	require.Len(t, chans.Channels, 1)
+	require.Equal(t, "member", chans.Channels[0].Roles.Read["kind"], "%+v", chans)
+	require.NotEqual(t, "Admin", chans.Channels[0].Tier)
+	c.ok("send", map[string]any{"team": teamParam, "app": 1,
+		"channel": map[string]any{"kind": "default"}, "body": "hello members"}, nil)
+	merklePoke(t)
+	var teamThread lcl.RTThreadView
+	bob.runCmdToJSON(t, &teamThread, "rt", "read", "-t", teamName)
+	require.Contains(t, threadBodies(teamThread), "hello members")
+
 	// --- invites ---
 	var inv struct {
 		Code string `json:"code"`
