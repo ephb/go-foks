@@ -18,6 +18,7 @@ package cli
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -151,6 +152,7 @@ func TestChatdM3(t *testing.T) {
 
 	t.Run("DisplayNames", r.displayNames)
 	t.Run("RepliesReactionsEditsDeletes", r.typedMessages)
+	t.Run("Channels", r.channels)
 }
 
 // displayNames: a DM with bob is listed with bob's name as he typed it
@@ -388,4 +390,126 @@ func (r *m3Rig) typedMessages(t *testing.T) {
 		}
 	}
 	require.True(t, found, api)
+}
+
+type m3Channel struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Tier     string `json:"tier"`
+	Archived bool   `json:"archived"`
+	Roles    struct {
+		Read map[string]any `json:"read"`
+	} `json:"roles"`
+}
+
+func listChannels(c *chatdClient, team map[string]any) []m3Channel {
+	var set struct {
+		Channels []m3Channel `json:"channels"`
+	}
+	c.ok("list_channels_for_team", map[string]any{"team": team, "app": 1}, &set)
+	return set.Channels
+}
+
+func channelNamed(t *testing.T, chans []m3Channel, name string) m3Channel {
+	t.Helper()
+	for _, ch := range chans {
+		if ch.Name == name {
+			return ch
+		}
+	}
+	t.Fatalf("no channel %q in %+v", name, chans)
+	return m3Channel{}
+}
+
+// channels: create (any member, readable by members by default), rename
+// and archive (admins only: a member gets auth), archived channels refuse
+// sends and can be unarchived.
+func (r *m3Rig) channels(t *testing.T) {
+	teamNm := "Chan_" + r.rnd
+	var created struct {
+		Team map[string]any `json:"team"`
+	}
+	r.alice.ok("create_team", map[string]any{"name": teamNm}, &created)
+	team := created.Team
+	merklePoke(t)
+	r.alice.ok("team_add_member", map[string]any{"team": team, "users": []string{r.bobNm}}, nil)
+	merklePoke(t)
+
+	// alice (owner) creates a channel with the default roles: member-tier.
+	var made struct {
+		ID string `json:"id"`
+	}
+	r.alice.ok("make_channel", map[string]any{"team": team, "app": 1, "name": "design", "desc": "",
+		"roles": map[string]any{"read": nil, "write": nil}}, &made)
+	require.NotEmpty(t, made.ID)
+	merklePoke(t)
+	design := channelNamed(t, listChannels(r.alice, team), "design")
+	require.Equal(t, "member", design.Roles.Read["kind"], "default roles are member: %+v", design)
+	require.NotEqual(t, "Admin", design.Tier)
+	byName := func(n string) map[string]any { return map[string]any{"kind": "name", "name": n} }
+	r.alice.ok("send", map[string]any{"team": team, "app": 1, "channel": byName("design"), "body": "design kickoff"}, nil)
+	merklePoke(t)
+	// bob, a member, sees and reads it.
+	require.Equal(t, design.ID, channelNamed(t, listChannels(r.bob, team), "design").ID)
+	msgs := threadMsgs(r.bob, team, byName("design"))
+	require.Len(t, msgs, 1)
+
+	// bob may create a channel too (FOKS: any member, roles up to his own).
+	r.bob.ok("make_channel", map[string]any{"team": team, "app": 1, "name": "bobs", "desc": "",
+		"roles": map[string]any{"read": nil, "write": nil}}, nil)
+	merklePoke(t)
+	// ... but not rename or archive one: admin-only, server-enforced, auth.
+	f := r.bob.call("update_channel", map[string]any{"team": team, "app": 1, "channel": byName("design"),
+		"update": map[string]any{"name": "hijacked", "desc": nil, "allow_duplicate_name": false}})
+	require.False(t, f.OK)
+	t.Logf("member rename: %+v", f.Error)
+	require.Equal(t, "auth", f.Error.Code)
+	f = r.bob.call("set_channel_archived", map[string]any{"team": team, "app": 1, "channel": byName("design"), "archived": true})
+	require.False(t, f.OK)
+	require.Equal(t, "auth", f.Error.Code)
+
+	// alice renames and archives.
+	r.alice.ok("update_channel", map[string]any{"team": team, "app": 1, "channel": byName("design"),
+		"update": map[string]any{"name": "design-2", "desc": nil, "allow_duplicate_name": false}}, nil)
+	merklePoke(t)
+	require.Equal(t, design.ID, channelNamed(t, listChannels(r.bob, team), "design-2").ID)
+	r.alice.ok("set_channel_archived", map[string]any{"team": team, "app": 1, "channel": byName("design-2"), "archived": true}, nil)
+	merklePoke(t)
+	require.True(t, channelNamed(t, listChannels(r.bob, team), "design-2").Archived)
+	f = r.bob.call("send", map[string]any{"team": team, "app": 1, "channel": byName("design-2"), "body": "too late"})
+	t.Logf("send to an archived channel: ok=%v %+v", f.OK, f.Error)
+	require.False(t, f.OK)
+	require.Equal(t, "channel_archived", f.Error.Code)
+	// The default channel cannot be archived (FOKS client-side check).
+	f = r.alice.call("set_channel_archived", map[string]any{"team": team, "app": 1, "channel": map[string]any{"kind": "default"}, "archived": true})
+	require.False(t, f.OK)
+	t.Logf("archive the default channel: %+v", f.Error)
+
+	r.alice.ok("set_channel_archived", map[string]any{"team": team, "app": 1, "channel": byName("design-2"), "archived": false}, nil)
+	merklePoke(t)
+	require.False(t, channelNamed(t, listChannels(r.alice, team), "design-2").Archived)
+
+	if r.kbBin == "" {
+		return
+	}
+	r.kb(t, r.alice, "chat", "channel", "create", teamNm, "random", "--desc", "anything goes")
+	r.kb(t, r.alice, "chat", "channel", "rename", teamNm, "random", "#off-topic")
+	r.kb(t, r.alice, "chat", "channel", "archive", teamNm, "bobs")
+	merklePoke(t)
+	out := r.kb(t, r.bob, "chat", "channel", "ls", teamNm)
+	t.Logf("kb chat channel ls:\n%s", out)
+	require.Contains(t, out, "#off-topic  anything goes")
+	require.Contains(t, out, "#design-2")
+	require.NotContains(t, out, "#bobs")
+	require.Contains(t, out, "(1 archived; --archived lists them)")
+	out = r.kb(t, r.bob, "chat", "channel", "ls", teamNm, "--archived")
+	require.Contains(t, out, "#bobs  [archived]")
+	// A member's rename fails with kb's hint (exit 1).
+	cmd := exec.Command(r.kbBin, "--no-autostart", "chat", "channel", "rename", teamNm, "off-topic", "mine")
+	cmd.Env = append(os.Environ(), "KB_CHATD_SOCKET=tcp://"+r.bob.addr, "KB_CHATD_TOKEN_FILE="+r.bob.tokenFile)
+	b, err := cmd.CombinedOutput()
+	require.Error(t, err)
+	t.Logf("kb rename as a member: %s", b)
+	require.Contains(t, string(b), "only team admins")
+	r.kb(t, r.alice, "chat", "channel", "unarchive", teamNm, "bobs")
 }
