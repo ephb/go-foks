@@ -199,7 +199,7 @@ func (c *AgentConn) putUsername(m libclient.MetaContext, arg proto.NameUtf8, ses
 
 	usernameAscii, err := core.NormalizeName(arg)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	regCli, err := sess.RegCli(m)
