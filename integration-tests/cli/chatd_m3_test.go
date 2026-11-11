@@ -18,6 +18,7 @@ package cli
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -149,6 +150,7 @@ func TestChatdM3(t *testing.T) {
 	defer r.close()
 
 	t.Run("DisplayNames", r.displayNames)
+	t.Run("RepliesReactionsEditsDeletes", r.typedMessages)
 }
 
 // displayNames: a DM with bob is listed with bob's name as he typed it
@@ -220,4 +222,170 @@ func (r *m3Rig) displayNames(t *testing.T) {
 	require.Contains(t, out, "team "+teamNm)
 	out = r.kb(t, r.alice, "chat", "read", "@"+r.bobNm, "-n", "5")
 	require.Contains(t, out, r.bobNm+": hi Alice", "kb chat read @Bob: %s", out)
+}
+
+func findMsg(t *testing.T, msgs []m3Msg, pred func(m3Msg) bool) m3Msg {
+	t.Helper()
+	for _, m := range msgs {
+		if pred(m) {
+			return m
+		}
+	}
+	b, _ := json.Marshal(msgs)
+	t.Fatalf("no such message in %s", b)
+	return m3Msg{}
+}
+
+// typedMessages: replies, reactions, edits and deletes travel as FOKS
+// pegged messages with chatd's body envelope, and come back with
+// reply_to set and the envelope unwrapped, on the other chatd.
+func (r *m3Rig) typedMessages(t *testing.T) {
+	dmTeam := map[string]any{"kind": "adhoc", "value": r.aliceNm + "," + r.bobNm}
+	def := map[string]any{"kind": "default"}
+	on := func(extra map[string]any) map[string]any {
+		p := map[string]any{"team": dmTeam, "app": 1, "channel": def}
+		for k, v := range extra {
+			p[k] = v
+		}
+		return p
+	}
+
+	var aliceSt, bobSt struct {
+		User struct {
+			Party string `json:"party"`
+		} `json:"user"`
+	}
+	r.alice.ok("status", nil, &aliceSt)
+	r.bob.ok("status", nil, &bobSt)
+	require.NotEmpty(t, aliceSt.User.Party, "status.user.party")
+	require.NotEqual(t, aliceSt.User.Party, bobSt.User.Party)
+
+	r.alice.ok("send", on(map[string]any{"body": "lunch at noon?"}), nil)
+	r.alice.ok("send", on(map[string]any{"body": "typo mesage"}), nil)
+	r.alice.ok("send", on(map[string]any{"body": "never mind"}), nil)
+	merklePoke(t)
+	msgs := threadMsgs(r.bob, dmTeam, def)
+	lunch := findMsg(t, msgs, func(m m3Msg) bool { return m.Body == "lunch at noon?" })
+	typo := findMsg(t, msgs, func(m m3Msg) bool { return m.Body == "typo mesage" })
+	nevermind := findMsg(t, msgs, func(m m3Msg) bool { return m.Body == "never mind" })
+	require.Equal(t, aliceSt.User.Party, lunch.Sender, "sender is the status party id")
+
+	// bob reacts and replies; alice edits and deletes her own.
+	var res struct {
+		Outcome string `json:"outcome"`
+	}
+	r.bob.ok("react", on(map[string]any{"target": lunch.MsgID, "emoji": "👍"}), &res)
+	require.Equal(t, "acked", res.Outcome)
+	r.bob.ok("send", on(map[string]any{"body": "yes, the usual place", "reply_to": lunch.MsgID}), nil)
+	r.alice.ok("edit", on(map[string]any{"target": typo.MsgID, "body": "typo message"}), nil)
+	r.alice.ok("delete", on(map[string]any{"target": nevermind.MsgID}), nil)
+	// The wire accepts an edit of someone else's message (FOKS does not
+	// check); readers ignore it (kb-core's fold).
+	r.bob.ok("edit", on(map[string]any{"target": lunch.MsgID, "body": "hijacked"}), nil)
+	f := r.bob.call("edit", on(map[string]any{"target": lunch.MsgID, "body": " "}))
+	require.False(t, f.OK)
+	require.Equal(t, "bad_args", f.Error.Code)
+	f = r.bob.call("react", on(map[string]any{"target": "nonsense", "emoji": "👍"}))
+	require.Equal(t, "bad_args", f.Error.Code)
+	merklePoke(t)
+
+	msgs = threadMsgs(r.alice, dmTeam, def)
+	b, _ := json.MarshalIndent(msgs, "", " ")
+	t.Logf("alice's thread view:\n%s", b)
+	react := findMsg(t, msgs, func(m m3Msg) bool { return m.Typ == "reactji" })
+	require.Equal(t, "👍", react.Body)
+	require.NotNil(t, react.ReplyTo)
+	require.Equal(t, lunch.MsgID, *react.ReplyTo)
+	require.Equal(t, bobSt.User.Party, react.Sender)
+	reply := findMsg(t, msgs, func(m m3Msg) bool { return m.Typ == "reply" })
+	require.Equal(t, "yes, the usual place", reply.Body)
+	require.Equal(t, lunch.MsgID, *reply.ReplyTo)
+	edit := findMsg(t, msgs, func(m m3Msg) bool { return m.Typ == "edit" && m.Body == "typo message" })
+	require.Equal(t, typo.MsgID, *edit.ReplyTo)
+	del := findMsg(t, msgs, func(m m3Msg) bool { return m.Typ == "edit" && m.Body == "" })
+	require.Equal(t, nevermind.MsgID, *del.ReplyTo)
+
+	// The inbox snippet is unwrapped too (the last message is bob's
+	// hijack attempt, an edit).
+	row := waitInbox(t, r.alice, "the DM", func(row m3InboxRow) bool { return row.TeamKind == "adhoc" })
+	require.NotNil(t, row.Snippet)
+	t.Logf("snippet after the edits: %q", *row.Snippet)
+	require.Equal(t, "hijacked", *row.Snippet)
+
+	// bob takes his reaction back: a delete of the reaction message.
+	r.bob.ok("delete", on(map[string]any{"target": react.MsgID}), nil)
+	merklePoke(t)
+
+	if r.kbBin == "" {
+		return
+	}
+	// kb shows the folded thread: the edit applied, the hijack ignored,
+	// the delete, the reply quote; and no reaction (taken back).
+	out := r.kb(t, r.alice, "chat", "read", "@"+r.bobNm, "-n", "50", "--peek")
+	t.Logf("kb chat read:\n%s", out)
+	require.Contains(t, out, "alice_"+r.rnd+": lunch at noon?\n")
+	require.Contains(t, out, "typo message (edited)")
+	require.Contains(t, out, ": (deleted)")
+	require.Contains(t, out, "(reply to [")
+	require.Contains(t, out, "alice_"+r.rnd+": lunch at noon?): yes, the usual place")
+	require.NotContains(t, out, "hijacked")
+	require.NotContains(t, out, "👍")
+
+	// kb chat react / edit / delete, naming messages by number.
+	num := func(text string) string {
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, text) && strings.HasPrefix(line, "[") {
+				return line[1:strings.Index(line, "]")]
+			}
+		}
+		t.Fatalf("no line with %q in %s", text, out)
+		return ""
+	}
+	lunchNum := num("lunch at noon?")
+	r.kb(t, r.bob, "chat", "react", "@"+r.aliceNm, lunchNum, "🎉")
+	r.kb(t, r.bob, "chat", "send", "@"+r.aliceNm, "--reply-to", lunchNum, "see you")
+	r.kb(t, r.alice, "chat", "edit", "@"+r.bobNm, num("typo message"), "typo message, again")
+	merklePoke(t)
+	out = r.kb(t, r.alice, "chat", "read", "@"+r.bobNm, "-n", "50", "--peek")
+	t.Logf("kb chat read after kb commands:\n%s", out)
+	require.Contains(t, out, "🎉 1 ("+r.bobNm+")")
+	require.Contains(t, out, "typo message, again (edited)")
+	require.Contains(t, out, "): see you")
+
+	// alice reacts and takes it back with --remove.
+	r.kb(t, r.alice, "chat", "react", "@"+r.bobNm, lunchNum, "🙏")
+	merklePoke(t)
+	r.kb(t, r.alice, "chat", "react", "@"+r.bobNm, lunchNum, "🙏", "--remove")
+	merklePoke(t)
+	out = r.kb(t, r.alice, "chat", "read", "@"+r.bobNm, "-n", "50", "--peek")
+	require.NotContains(t, out, "🙏")
+
+	// kb chat api: reaction by message number, and read's shapes.
+	api := r.kb(t, r.alice, "chat", "api", "-m", `{"method":"reaction","params":{"options":{"channel":{"name":"`+
+		r.aliceNm+","+r.bobNm+`"},"message_id":`+lunchNum+`,"message":{"body":":+1:"}}}}`)
+	require.Contains(t, api, `"message":"message sent"`, api)
+	merklePoke(t)
+	api = r.kb(t, r.alice, "chat", "api", "-m", `{"method":"read","params":{"options":{"channel":{"name":"`+
+		r.aliceNm+","+r.bobNm+`"},"peek":true}}}`)
+	var read struct {
+		Result struct {
+			Messages []struct {
+				Msg struct {
+					ID        int             `json:"id"`
+					Content   json.RawMessage `json:"content"`
+					Reactions json.RawMessage `json:"reactions"`
+				} `json:"msg"`
+			} `json:"messages"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(api), &read), api)
+	var found bool
+	for _, m := range read.Result.Messages {
+		if strconv.Itoa(m.Msg.ID) == lunchNum {
+			found = true
+			require.Contains(t, string(m.Msg.Reactions), ":+1:", api)
+			require.Contains(t, string(m.Msg.Reactions), "🎉", api)
+		}
+	}
+	require.True(t, found, api)
 }
