@@ -8,10 +8,12 @@ import (
 	"crypto/x509"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
+	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -44,6 +46,26 @@ func NewRealAutocertDoer() *RealAutocertDoer {
 	return &RealAutocertDoer{
 		mgr: &autocert.Manager{
 			Prompt: autocert.AcceptTOS,
+			Client: testACMEClient(),
+		},
+	}
+}
+
+// testACMEClient points autocert at a test ACME server (e.g. Pebble) when
+// FOKS_TEST_ACME_DIRECTORY is set, trusting any TLS cert it serves. Test
+// only (chat-foks deploy-kit rig): without the variable, autocert uses
+// Let's Encrypt as before.
+func testACMEClient() *acme.Client {
+	dir := os.Getenv("FOKS_TEST_ACME_DIRECTORY")
+	if dir == "" {
+		return nil
+	}
+	return &acme.Client{
+		DirectoryURL: dir,
+		HTTPClient: &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test ACME server only
+			},
 		},
 	}
 }
