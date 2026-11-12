@@ -106,6 +106,8 @@ type StandupCmd struct {
 	interactive   bool
 	viewershipStr string
 	viewership    *proto.ViewershipMode
+	serverImage   string
+	toolImage     string
 }
 
 func (s *StandupCmd) CobraConfig() *cobra.Command {
@@ -124,6 +126,8 @@ docker-compose up`,
 	ret.Flags().IntVar(&s.httpLocalPort, "http-local-port", defHttpPort, "port to listen for HTTP requests on")
 	ret.Flags().BoolVar(&s.interactive, "interactive", true, "run in interactive mode, prompting for user input")
 	ret.Flags().StringVar(&s.viewershipStr, "viewership", "", "viewership mode for the server; one of: closed, open (default: open)")
+	ret.Flags().StringVar(&s.serverImage, "server-image", foksServer, "docker image for the FOKS server services in docker-compose.yml")
+	ret.Flags().StringVar(&s.toolImage, "tool-image", foksTool, "docker image for foks-tool services (beacon_register) in docker-compose.yml")
 	return ret
 }
 
@@ -341,6 +345,8 @@ func (s *StandupCmd) Run(m shared.MetaContext) error {
 		httpLocalPort: s.httpLocalPort,
 		force:         s.force,
 		viewership:    *s.viewership,
+		serverImage:   s.serverImage,
+		toolImage:     s.toolImage,
 	}
 
 	return eng.runAndCleanup(m)
@@ -356,6 +362,8 @@ type StandupEng struct {
 	httpLocalPort int
 	force         bool
 	viewership    proto.ViewershipMode
+	serverImage   string
+	toolImage     string
 
 	// generated secrets and keys
 	iid        string // instance ID, generated at startup
@@ -1435,6 +1443,20 @@ func (e *StandupEng) generateDBKeys(m shared.MetaContext) (err error) {
 	)
 }
 
+func (e *StandupEng) serverImageOrDefault() string {
+	if e.serverImage == "" {
+		return foksServer
+	}
+	return e.serverImage
+}
+
+func (e *StandupEng) toolImageOrDefault() string {
+	if e.toolImage == "" {
+		return foksTool
+	}
+	return e.toolImage
+}
+
 func (e *StandupEng) writeDockerComposeYMLinner(m shared.MetaContext) error {
 
 	mkdur := func(t time.Duration) *types.Duration {
@@ -1539,7 +1561,7 @@ func (e *StandupEng) writeDockerComposeYMLinner(m shared.MetaContext) error {
 		}
 		sc := types.ServiceConfig{
 			Name:    svc.ToString(),
-			Image:   foksServer,
+			Image:   e.serverImageOrDefault(),
 			Logging: dockerLogging,
 			Command: types.ShellCommand{
 				svc.ToCommand(),
@@ -1567,7 +1589,7 @@ func (e *StandupEng) writeDockerComposeYMLinner(m shared.MetaContext) error {
 
 	project.Services = append(project.Services, types.ServiceConfig{
 		Name:    "beacon_register",
-		Image:   foksTool,
+		Image:   e.toolImageOrDefault(),
 		Logging: dockerLogging,
 		Command: types.ShellCommand{
 			"beacon-register",
