@@ -37,8 +37,8 @@ import (
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/stretchr/testify/require"
 
-	"github.com/terra/kebase-fork/backend/shim"
-	"github.com/terra/kebase-fork/backend/shim/wire"
+	"github.com/ephb/chat-foks/backend/shim"
+	"github.com/ephb/chat-foks/backend/shim/wire"
 )
 func TestShimAdapterRoundTrip(t *testing.T) {
 	r := makeRTOutboxTestRig(t)

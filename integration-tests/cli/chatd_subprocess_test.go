@@ -26,7 +26,7 @@ import (
 	"github.com/foks-proj/go-foks/proto/lcl"
 	"github.com/stretchr/testify/require"
 
-	"github.com/terra/kebase-fork/backend/shim/wire"
+	"github.com/ephb/chat-foks/backend/shim/wire"
 )
 
 // TestChatdSubprocessAuthenticatedExchange proves the full desktop chatd
@@ -62,7 +62,7 @@ func TestChatdSubprocessAuthenticatedExchange(t *testing.T) {
 		// Build chatd.exe into a temp dir if not pre-built by caller.
 		chatdBin = filepath.Join(t.TempDir(), "chatd.exe")
 		buildCmd := exec.Command("go", "build", "-ldflags=-s -w", "-o", chatdBin,
-			"github.com/terra/kebase-fork/backend/shim/cmd/chatd")
+			"github.com/ephb/chat-foks/backend/shim/cmd/chatd")
 		buildOut, err := buildCmd.CombinedOutput()
 		require.NoError(t, err, "building chatd failed: %s", string(buildOut))
 	}

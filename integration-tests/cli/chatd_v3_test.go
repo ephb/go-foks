@@ -28,7 +28,7 @@ import (
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/stretchr/testify/require"
 
-	"github.com/terra/kebase-fork/backend/shim/wire"
+	"github.com/ephb/chat-foks/backend/shim/wire"
 )
 
 // chatdFrame is either a response (ID set) or an event (ID null).
@@ -62,7 +62,7 @@ func buildChatd(t *testing.T) string {
 	}
 	bin := filepath.Join(t.TempDir(), "chatd.exe")
 	out, err := exec.Command("go", "build", "-ldflags=-s -w", "-o", bin,
-		"github.com/terra/kebase-fork/backend/shim/cmd/chatd").CombinedOutput()
+		"github.com/ephb/chat-foks/backend/shim/cmd/chatd").CombinedOutput()
 	require.NoError(t, err, "building chatd failed: %s", string(out))
 	return bin
 }
