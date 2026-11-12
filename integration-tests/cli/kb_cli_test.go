@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	"github.com/stretchr/testify/require"
 )
@@ -272,4 +273,25 @@ func TestKbCLILogin(t *testing.T) {
 	require.Contains(t, out, "(unlocked)")
 	out = kbRun(t, bin, c, "", "status")
 	require.NotContains(t, out, "locked:")
+}
+
+// TestKbCLISignupFlags runs `kb signup` with every answer given as a flag,
+// the way chat-foks's deploy smoke check (deploy/hetzner/smoke.sh) does.
+// chatd decides the prompt order (this host asks no invite code), so the
+// flags answer by prompt kind; nothing is read from the terminal.
+func TestKbCLISignupFlags(t *testing.T) {
+	bin := os.Getenv("KB_BIN")
+	if bin == "" {
+		t.Skip("set KB_BIN to the kb CLI binary to run this test")
+	}
+	vh := vHost(t, 4)
+	cfg := newTestAgent(t)
+	c := startChatdFresh(t, cfg.cfgFlags)
+	invite, err := core.ExportInviteCode(globalTestEnv.G.TestMultiUseInviteCode())
+	require.NoError(t, err)
+	name := "piped_" + strings.ToLower(fsRandomString(t, 6))
+	kbRun(t, bin, c, "", "signup", "--server", string(vh.Addr), "--invite-code", invite,
+		"--email", name+"@example.com", "--username", name, "--device-name", "ci-smoke", "--no-passphrase")
+	out := kbRun(t, bin, c, "", "status")
+	require.Contains(t, out, name, "kb status: %s", out)
 }
