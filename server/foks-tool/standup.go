@@ -108,6 +108,7 @@ type StandupCmd struct {
 	viewership    *proto.ViewershipMode
 	serverImage   string
 	toolImage     string
+	dbBindIP      string
 }
 
 func (s *StandupCmd) CobraConfig() *cobra.Command {
@@ -128,6 +129,7 @@ docker-compose up`,
 	ret.Flags().StringVar(&s.viewershipStr, "viewership", "", "viewership mode for the server; one of: closed, open (default: open)")
 	ret.Flags().StringVar(&s.serverImage, "server-image", foksServer, "docker image for the FOKS server services in docker-compose.yml")
 	ret.Flags().StringVar(&s.toolImage, "tool-image", foksTool, "docker image for foks-tool services (beacon_register) in docker-compose.yml")
+	ret.Flags().StringVar(&s.dbBindIP, "db-bind-ip", "", "host IP the database port is published on; 127.0.0.1 keeps it off the network (foks-tool on the host still reaches it); default: all interfaces")
 	return ret
 }
 
@@ -347,6 +349,7 @@ func (s *StandupCmd) Run(m shared.MetaContext) error {
 		viewership:    *s.viewership,
 		serverImage:   s.serverImage,
 		toolImage:     s.toolImage,
+		dbBindIP:      s.dbBindIP,
 	}
 
 	return eng.runAndCleanup(m)
@@ -364,6 +367,7 @@ type StandupEng struct {
 	viewership    proto.ViewershipMode
 	serverImage   string
 	toolImage     string
+	dbBindIP      string
 
 	// generated secrets and keys
 	iid        string // instance ID, generated at startup
@@ -943,7 +947,7 @@ func (e *StandupEng) databaseCreateContainer(m shared.MetaContext) error {
 		&container.HostConfig{
 			PortBindings: nat.PortMap{
 				dstPortNat: []nat.PortBinding{
-					{HostIP: "0.0.0.0", HostPort: fmt.Sprintf("%d", e.dbPort)},
+					{HostIP: e.dbBindIPOrDefault(), HostPort: fmt.Sprintf("%d", e.dbPort)},
 				},
 			},
 			Binds: []string{
@@ -1443,6 +1447,13 @@ func (e *StandupEng) generateDBKeys(m shared.MetaContext) (err error) {
 	)
 }
 
+func (e *StandupEng) dbBindIPOrDefault() string {
+	if e.dbBindIP == "" {
+		return "0.0.0.0"
+	}
+	return e.dbBindIP
+}
+
 func (e *StandupEng) serverImageOrDefault() string {
 	if e.serverImage == "" {
 		return foksServer
@@ -1508,6 +1519,7 @@ func (e *StandupEng) writeDockerComposeYMLinner(m shared.MetaContext) error {
 						Published: fmt.Sprintf("%d", e.dbPort),
 						Protocol:  "tcp",
 						Mode:      "host",
+						HostIP:    e.dbBindIP, // empty: all interfaces, as before
 					},
 				},
 			},
