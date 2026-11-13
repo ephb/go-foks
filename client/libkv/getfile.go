@@ -315,7 +315,10 @@ func (k *Minder) getLargeFileChunkAtOffsetWithSeed(
 	if err != nil {
 		return nil, err
 	}
-	nn, err := chunkNonce(fid, offset, chnk.Final)
+	// The server returns the chunk that holds offset, which starts at or
+	// before it (chnk.Offset <= offset). The nonce is bound to where the
+	// chunk starts, and the caller wants the bytes from offset on.
+	nn, err := chunkNonce(fid, chnk.Offset, chnk.Final)
 	if err != nil {
 		return nil, err
 	}
@@ -330,10 +333,10 @@ func (k *Minder) getLargeFileChunkAtOffsetWithSeed(
 		return nil, err
 	}
 
-	if chnk.Offset < offset {
-		return nil, core.InternalError("chunk offset less than requested offset")
+	if chnk.Offset > offset {
+		return nil, core.InternalError("chunk starts after the requested offset")
 	}
-	diff := chnk.Offset - offset
+	diff := offset - chnk.Offset
 	if int(diff) > len(ret) {
 		return nil, core.InternalError("chunk runs out of bounds")
 	}
