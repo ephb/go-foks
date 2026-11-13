@@ -441,6 +441,13 @@ func getDirent(
 	}
 
 	dat, err := loadNode(m, db, pid, de.Value, role)
+	if _, ok := err.(core.KVNoentError); ok && typ == proto.KVNodeType_File {
+		// The GC collected the file (an abandoned upload that this dirent
+		// still links). Send the dirent without its node: clients read that
+		// as "no such file" and can still unlink or overwrite the name,
+		// which an error here would stop.
+		return &ret, nil
+	}
 	if err != nil {
 		return nil, err
 	}

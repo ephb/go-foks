@@ -125,6 +125,10 @@ CREATE TABLE large_file_key (
 
 CREATE INDEX large_file_mtime_gc_idx ON large_file(mtime) WHERE (refcount = 0);
 CREATE INDEX large_file_mtime_gc_active_idx ON large_file(mtime) WHERE (status = 'dead');
+CREATE INDEX large_file_gc_unlinked_idx ON large_file(mtime)
+    WHERE (refcount = 0 AND status = 'active');
+CREATE INDEX large_file_gc_uploading_idx ON large_file(mtime)
+    WHERE (status = 'uploading');
 
 CREATE TABLE large_file_chunk (
     short_host_id SMALLINT NOT NULL,
@@ -194,3 +198,9 @@ CREATE TABLE quota_check_vhost (
 
 CREATE INDEX quota_check_idx ON quota_check(short_host_id, check_time) WHERE (num_new_writes > 0);
 CREATE INDEX quota_check_vhost_idx ON quota_check_vhost(check_time) WHERE (num_new_writes > 0);
+
+CREATE TABLE schema_patches (
+    id INTEGER NOT NULL PRIMARY KEY,
+    ctime TIMESTAMP NOT NULL
+);
+INSERT INTO schema_patches (id, ctime) VALUES (1, NOW());

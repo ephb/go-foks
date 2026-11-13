@@ -47,6 +47,7 @@ type LargeFileStorageEngine interface {
 type Server struct {
 	shared.BaseRPCServer
 	lfe LargeFileStorageEngine
+	gc  shared.KVGCConfig
 }
 
 var _ shared.RPCServer = (*Server)(nil)
@@ -69,6 +70,7 @@ func (s *Server) Setup(m shared.MetaContext) error {
 	if err != nil {
 		return err
 	}
+	s.gc = cfg.GC()
 	p := cfg.BlobStorePath()
 	switch {
 	case p == "sql":
@@ -81,6 +83,19 @@ func (s *Server) Setup(m shared.MetaContext) error {
 	default:
 		return core.BadArgsError("invalid blob store path")
 	}
+	return nil
+}
+
+// RunBackgroundLoops starts the large-file GC when the config turns it on
+// (kv_store.gc.enabled). It takes no run-lock: each file is collected in its
+// own transaction under a row lock, so replicas can run it side by side.
+func (s *Server) RunBackgroundLoops(m shared.MetaContext, _ chan<- error) error {
+	if !s.gc.Enabled {
+		return nil
+	}
+	m.Infow("kv gc enabled", "interval", s.gc.Interval,
+		"unlinkedGrace", s.gc.UnlinkedGrace, "uploadGrace", s.gc.UploadGrace)
+	go gcLoop(m, s.gc)
 	return nil
 }
 

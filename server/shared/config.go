@@ -282,7 +282,38 @@ type UserServerConfigger interface {
 }
 type KVServerConfigger interface {
 	BlobStorePath() string
+	GC() KVGCConfig
 }
+
+// KVGCConfig controls the KV store's garbage collector, which deletes the
+// chunks of large files that nothing links to any more (and of uploads
+// that stalled) and gives the space back to the party's usage. It is off
+// unless the config turns it on.
+type KVGCConfig struct {
+	Enabled bool
+	// How often each kv_store server runs a pass.
+	Interval time.Duration
+	// A finished file that no dirent links to is collected once it has been
+	// unlinked for this long. It must be longer than a client takes between
+	// finishing an upload and linking the file.
+	UnlinkedGrace time.Duration
+	// An upload with no new chunk for this long is abandoned and collected,
+	// linked or not.
+	UploadGrace time.Duration
+	// Files collected per shard per transaction batch.
+	BatchSize int
+}
+
+func DefaultKVGCConfig() KVGCConfig {
+	return KVGCConfig{
+		Enabled:       false,
+		Interval:      10 * time.Minute,
+		UnlinkedGrace: time.Hour,
+		UploadGrace:   24 * time.Hour,
+		BatchSize:     100,
+	}
+}
+
 type RealTimeConfigger interface {
 }
 
