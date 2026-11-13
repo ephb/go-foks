@@ -23,19 +23,36 @@ func fileRef(
 	id proto.FileID,
 	v int,
 ) error {
+	// A new link to a file the GC has collected must fail: its chunks are
+	// gone. The UPDATE takes the row lock, so it serializes with the GC.
+	// Dropping a link to a dead file is fine (a dirent can point at an
+	// abandoned upload that was collected).
 	tag, err := tx.Exec(
 		m.Ctx(),
 		`UPDATE large_file SET refcount=refcount+$1, mtime=NOW()
-		WHERE short_host_id=$2 AND short_party_id=$3 AND file_id=$4`,
+		WHERE short_host_id=$2 AND short_party_id=$3 AND file_id=$4
+		  AND ($1 < 0 OR status <> 'dead')`,
 		v, int(m.HostID().Short), pid.Shorten().ExportToDB(), id.ExportToDB(),
 	)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() != 1 {
-		return core.UpdateError("large_file")
+	if tag.RowsAffected() == 1 {
+		return nil
 	}
-	return nil
+	if v > 0 {
+		var status string
+		err = tx.QueryRow(
+			m.Ctx(),
+			`SELECT status FROM large_file
+			WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3`,
+			int(m.HostID().Short), pid.Shorten().ExportToDB(), id.ExportToDB(),
+		).Scan(&status)
+		if err == nil && status == LargeFileStatusDead.ExportToDB() {
+			return core.KVNoentError{}
+		}
+	}
+	return core.UpdateError("large_file")
 }
 
 func smallFileRef(
@@ -240,29 +257,59 @@ type fileUploader struct {
 	md   proto.LargeFileMetadata
 }
 
-func (f *fileUploader) assertUploading(m shared.MetaContext) error {
+// lockFile loads the file's status and locks its row for the rest of the
+// transaction, so a chunk upload and the GC never interleave.
+func (f *fileUploader) lockFile(m shared.MetaContext) (LargeFileStatus, error) {
 	var status string
 	err := f.tx.QueryRow(
 		m.Ctx(),
 		`SELECT status FROM large_file
-		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3`,
+		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3
+		FOR UPDATE`,
 		int(m.HostID().Short), f.pid.Shorten().ExportToDB(), f.fid.ExportToDB(),
 	).Scan(&status)
+	if err == pgx.ErrNoRows {
+		return LargeFileStatusNone, core.UploadError("no such upload")
+	}
 	if err != nil {
-		return err
+		return LargeFileStatusNone, err
 	}
-	if status != LargeFileStatusUploading.ExportToDB() {
-		return core.UploadError("file not in uploading state")
-	}
-	return nil
+	return ParseLargeFileStatus(status)
 }
 
 func (f *fileUploader) doChunk(m shared.MetaContext) error {
-	err := f.assertUploading(m)
+	st, err := f.lockFile(m)
 	if err != nil {
 		return err
 	}
-	err = f.insChunk(m)
+	switch st {
+	case LargeFileStatusUploading:
+	case LargeFileStatusActive:
+		// The final chunk sent again after the first try committed but its
+		// reply was lost: succeed, so the client can carry on.
+		same, err := f.sameAsStoredChunk(m)
+		if err != nil {
+			return err
+		}
+		if same && f.chnk.Final != nil {
+			return nil
+		}
+		return core.UploadError("file not in uploading state")
+	default:
+		return core.UploadError("file not in uploading state")
+	}
+	_, err = f.insChunk(m)
+	if err != nil {
+		return err
+	}
+	// mtime is the upload's last sign of life; the GC collects uploads that
+	// have been quiet for too long.
+	_, err = f.tx.Exec(
+		m.Ctx(),
+		`UPDATE large_file SET mtime=NOW()
+		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3`,
+		int(m.HostID().Short), f.pid.Shorten().ExportToDB(), f.fid.ExportToDB(),
+	)
 	if err != nil {
 		return err
 	}
@@ -271,6 +318,30 @@ func (f *fileUploader) doChunk(m shared.MetaContext) error {
 		return err
 	}
 	return nil
+}
+
+// sameAsStoredChunk reports whether a chunk is already stored at this
+// offset with exactly these bytes. A chunk's nonce is derived from the file
+// ID, its offset and whether it is final, so a client retrying a chunk sends
+// byte-identical ciphertext.
+func (f *fileUploader) sameAsStoredChunk(m shared.MetaContext) (bool, error) {
+	var data []byte
+	var final bool
+	err := f.tx.QueryRow(
+		m.Ctx(),
+		`SELECT data, final FROM large_file_chunk
+		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3
+		  AND chunk_offset=$4`,
+		int(m.HostID().Short), f.pid.Shorten().ExportToDB(), f.fid.ExportToDB(),
+		int(f.chnk.Offset),
+	).Scan(&data, &final)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(data, f.chnk.Data) && final == (f.chnk.Final != nil), nil
 }
 
 func (f *fileUploader) run(m shared.MetaContext) error {
@@ -286,7 +357,7 @@ func (f *fileUploader) run(m shared.MetaContext) error {
 	if err != nil {
 		return err
 	}
-	err = f.insChunk(m)
+	_, err = f.insChunk(m)
 	if err != nil {
 		return err
 	}
@@ -386,40 +457,33 @@ func (f *fileUploader) insKey(m shared.MetaContext) error {
 	return nil
 }
 
-func (f *fileUploader) insChunk(m shared.MetaContext) error {
+// insChunk stores the chunk and charges it against usage. The returned bool
+// reports an idempotent replay: the same bytes were already stored at this
+// offset (a retry after a lost reply), so nothing was written or charged.
+// Different bytes at a stored offset are refused.
+func (f *fileUploader) insChunk(m shared.MetaContext) (bool, error) {
 
 	chnk := f.chnk
 	if len(chnk.Data) > kv.MaxEncryptedChunkSize {
-		return core.TooBigError{
+		return false, core.TooBigError{
 			Actual: len(chnk.Data),
 			Limit:  kv.MaxEncryptedChunkSize,
 			Desc:   "file chunk",
 		}
 	}
 	if len(chnk.Data) < kv.MinEncryptedChunkSize {
-		return core.UploadError("chunk is too small")
+		return false, core.UploadError("chunk is too small")
 	}
 	first := (chnk.Offset == 0)
 	final := (chnk.Final != nil)
 
-	err := usageCheckAndInc(
-		m,
-		f.tx,
-		f.pid,
-		proto.KVNodeType_File,
-		len(chnk.Data),
-		first,
-	)
-	if err != nil {
-		return err
-	}
-
 	tag, err := f.tx.Exec(
 		m.Ctx(),
 		`INSERT INTO large_file_chunk(
-			short_host_id, short_party_id, file_id, chunk_offset, 
+			short_host_id, short_party_id, file_id, chunk_offset,
 			data, final, ctime
-		) VALUES($1, $2, $3, $4, $5, $6, NOW())`,
+		) VALUES($1, $2, $3, $4, $5, $6, NOW())
+		ON CONFLICT DO NOTHING`,
 		int(m.HostID().Short),
 		f.pid.Shorten().ExportToDB(),
 		f.fid.ExportToDB(),
@@ -428,12 +492,35 @@ func (f *fileUploader) insChunk(m shared.MetaContext) error {
 		final,
 	)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		same, err := f.sameAsStoredChunk(m)
+		if err != nil {
+			return false, err
+		}
+		if !same {
+			return false, core.KVRaceError("file chunk offset reused with different contents")
+		}
+		return true, nil
 	}
 	if tag.RowsAffected() != 1 {
-		return core.UpdateError("large_file_chunk")
+		return false, core.InsertError("large_file_chunk")
 	}
-	return nil
+
+	// Only a chunk that was actually stored is charged.
+	err = usageCheckAndInc(
+		m,
+		f.tx,
+		f.pid,
+		proto.KVNodeType_File,
+		len(chnk.Data),
+		first,
+	)
+	if err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func (f *fileUploader) checkChunks(m shared.MetaContext) error {
@@ -631,7 +718,8 @@ func loadLargeFileMetadata(
 }
 
 // loadLargeFileReadRole reads the read role of a large file's current version,
-// for callers that must authorize access without loading the key box.
+// and the file's status, for callers that must authorize access without
+// loading the key box.
 func loadLargeFileReadRole(
 	m shared.MetaContext,
 	db *pgxpool.Conn,
@@ -639,30 +727,37 @@ func loadLargeFileReadRole(
 	fid proto.FileID,
 ) (
 	proto.Role,
+	LargeFileStatus,
 	error,
 ) {
 	var ret proto.Role
 	var rt, vl int
+	var status string
 	err := db.QueryRow(
 		m.Ctx(),
-		`SELECT read_role_type, read_role_viz_level
+		`SELECT read_role_type, read_role_viz_level, status
 		FROM large_file_key
+		JOIN large_file USING(short_host_id, short_party_id, file_id)
 		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3
 		ORDER BY version DESC
 		LIMIT 1`,
 		int(m.ShortHostID()), pid.Shorten().ExportToDB(), fid.ExportToDB(),
-	).Scan(&rt, &vl)
+	).Scan(&rt, &vl, &status)
 	if err != nil && err == pgx.ErrNoRows {
-		return ret, core.NotFoundError("large file key")
+		return ret, LargeFileStatusNone, core.NotFoundError("large file key")
 	}
 	if err != nil {
-		return ret, err
+		return ret, LargeFileStatusNone, err
 	}
 	err = ret.ImportFromDB(rt, vl)
 	if err != nil {
-		return ret, err
+		return ret, LargeFileStatusNone, err
 	}
-	return ret, nil
+	st, err := ParseLargeFileStatus(status)
+	if err != nil {
+		return ret, LargeFileStatusNone, err
+	}
+	return ret, st, nil
 }
 
 func getNode(
@@ -699,13 +794,18 @@ func getChunk(
 	// ID, at any role. The chunk is sealed to the PTK at the file's read role,
 	// so this was not a plaintext leak; it disclosed existence, size and chunk
 	// layout, and left the whole gate to the crypto.
-	fileRole, err := loadLargeFileReadRole(m, db, pid, arg.Id)
+	fileRole, st, err := loadLargeFileReadRole(m, db, pid, arg.Id)
 	if err != nil {
 		return nil, err
 	}
 	err = assertAtOrAbove(role, fileRole, proto.KVOp_Read, proto.KVNodeType_File)
 	if err != nil {
 		return nil, err
+	}
+	// After the role check, as in loadLargeFileMetadata. A file the GC has
+	// collected has no chunks left: say "no such file", not "chunk not found".
+	if st == LargeFileStatusDead {
+		return nil, core.KVNoentError{}
 	}
 	return lfe.Get(m, db, pid, arg.Id, arg.Offset)
 }

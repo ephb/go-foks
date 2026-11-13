@@ -103,7 +103,18 @@ type UserServerConfigJSON struct {
 	BadLoginRateLimit_ RateLimit `json:"bad_login_rate_limit"`
 }
 type KVStoreServerConfigJSON struct {
-	BlobStorePath_ string `json:"blob_store_path"`
+	BlobStorePath_ string          `json:"blob_store_path"`
+	GC_            *KVGCConfigJSON `json:"gc"`
+}
+
+// KVGCConfigJSON is kv_store.gc in the server config. Unset or zero fields
+// take the defaults in DefaultKVGCConfig.
+type KVGCConfigJSON struct {
+	Enabled_       bool    `json:"enabled"`
+	Interval_      Seconds `json:"interval_sec"`
+	UnlinkedGrace_ Seconds `json:"unlinked_grace_sec"`
+	UploadGrace_   Seconds `json:"upload_grace_sec"`
+	BatchSize_     int     `json:"batch_size"`
 }
 
 type LooperConfigJSON struct {
@@ -600,6 +611,28 @@ func (k *KVStoreServerConfigJSON) BlobStorePath() string {
 		return ""
 	}
 	return k.BlobStorePath_
+}
+
+func (k *KVStoreServerConfigJSON) GC() KVGCConfig {
+	ret := DefaultKVGCConfig()
+	if k == nil || k.GC_ == nil {
+		return ret
+	}
+	g := k.GC_
+	ret.Enabled = g.Enabled_
+	if g.Interval_ > 0 {
+		ret.Interval = g.Interval_.Duration()
+	}
+	if g.UnlinkedGrace_ > 0 {
+		ret.UnlinkedGrace = g.UnlinkedGrace_.Duration()
+	}
+	if g.UploadGrace_ > 0 {
+		ret.UploadGrace = g.UploadGrace_.Duration()
+	}
+	if g.BatchSize_ > 0 {
+		ret.BatchSize = g.BatchSize_
+	}
+	return ret
 }
 
 func (c *ConfigJSonnet) KVStoreServerConfig(ctx context.Context) (KVServerConfigger, error) {
