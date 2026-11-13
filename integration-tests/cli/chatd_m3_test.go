@@ -604,8 +604,11 @@ func (r *m3Rig) invitesAndJoins(t *testing.T) {
 	r.alice.ok("send", map[string]any{"team": team, "app": 1, "channel": map[string]any{"kind": "default"}, "body": "welcome bob"}, nil)
 	merklePoke(t)
 	msgs := threadMsgs(r.bob, team, map[string]any{"kind": "default"})
-	require.Len(t, msgs, 1)
+	require.Len(t, msgs, 2)
 	require.Equal(t, "welcome bob", msgs[0].Body)
+	// Before it, alice's chatd's system line for the admit (PLAN-chat 63).
+	require.JSONEq(t, `{"kbf":1,"sys":{"type":"added","users":["`+r.bobNm+`"],"role":"member"}}`, msgs[1].Body)
+	require.Equal(t, r.aliceNm, *msgs[1].SenderName)
 
 	if r.kbBin == "" {
 		return
