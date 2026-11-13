@@ -130,6 +130,34 @@ func TestChatdTeams(t *testing.T) {
 	f = r.bob.call("get_thread_view", map[string]any{"team": team, "app": 1, "channel": map[string]any{"kind": "default"}, "before": 0, "num": 50})
 	require.False(t, f.OK)
 
+	// 59: user_keys. bob sees the fingerprint alice sees for herself; a
+	// new key (a backup key) changes it.
+	type userKeys struct {
+		User        string `json:"user"`
+		Fingerprint string `json:"fingerprint"`
+		Devices     []struct {
+			ID   string `json:"id"`
+			Type string `json:"type"`
+		} `json:"devices"`
+	}
+	var mine, seen userKeys
+	r.alice.ok("user_keys", map[string]any{"user": r.aliceNm}, &mine)
+	r.bob.ok("user_keys", map[string]any{"user": r.aliceNm}, &seen)
+	t.Logf("alice's keys: %+v", seen)
+	require.Len(t, seen.Devices, 1)
+	require.Equal(t, mine.Fingerprint, seen.Fingerprint)
+	require.Len(t, strings.Fields(seen.Fingerprint), 8)
+	r.alice.ok("create_backup_key", nil, nil)
+	merklePoke(t)
+	merklePoke(t)
+	var later userKeys
+	r.bob.ok("user_keys", map[string]any{"user": r.aliceNm}, &later)
+	require.Len(t, later.Devices, 2)
+	require.NotEqual(t, seen.Fingerprint, later.Fingerprint, "a new key changes the fingerprint")
+	f = r.bob.call("user_keys", map[string]any{"user": "nobody_" + r.rnd})
+	require.Equal(t, "bad_args", f.Error.Code, "%+v", f.Error)
+	require.Contains(t, f.Error.Message, "Couldn't find nobody_")
+
 	if r.kbBin == "" {
 		return
 	}
