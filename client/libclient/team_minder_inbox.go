@@ -47,6 +47,13 @@ func (t *TeamMinder) makeAdminBearerToken(
 	if !tmid.Host.Eq(t.au.HostID()) {
 		return nil, core.HostMismatchError{}
 	}
+	if ptk == nil {
+		// A plain member sees the public halves of the admin keys (so the
+		// callers' LastGen check passes) but holds no private one. Without
+		// this the nil key is dereferenced below and the process crashes
+		// (found by chat-foks: a member's change-roles killed chatd).
+		return nil, core.PermissionError("not admin")
+	}
 	err := ptk.GetRole().AssertAdminOrAbove(core.PermissionError("not admin"))
 	if err != nil {
 		return nil, err
