@@ -13,6 +13,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -185,4 +186,29 @@ func TestChatdTeams(t *testing.T) {
 	merklePoke(t)
 	_, still = teamRoles(r.alice, team)[bob]
 	require.False(t, still)
+
+	// kb chat export (PLAN-chat 100): the whole default channel, oldest
+	// first, with the system lines chatd posted above.
+	out = r.kb(t, r.alice, "chat", "export", teamNm)
+	t.Logf("kb chat export:\n%s", out)
+	require.Contains(t, out, "* "+r.aliceNm+" removed "+r.bobNm)
+	require.Contains(t, out, ": before")
+	out = r.kb(t, r.alice, "chat", "export", teamNm, "--json")
+	var exp struct {
+		Messages []struct {
+			Seq    int    `json:"seq"`
+			Body   string `json:"body"`
+			System string `json:"system"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &exp))
+	require.NotEmpty(t, exp.Messages)
+	require.Equal(t, 1, exp.Messages[0].Seq, "oldest first")
+	systems := 0
+	for _, m := range exp.Messages {
+		if m.System != "" {
+			systems++
+		}
+	}
+	require.Greater(t, systems, 3)
 }
