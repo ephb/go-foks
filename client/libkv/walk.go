@@ -194,7 +194,11 @@ func (k *Minder) walkOne(
 	comp := path[0]
 	rest := path[1:]
 	wd := core.Last(stk)
-	forPut := (opts.writePerms != nil)
+	// An unlink looks up like a put: it wants the dirent even when it has no
+	// node behind it, as for a file the server's GC collected. Without that
+	// such a name could never be removed. A missing name or a tombstone still
+	// fails the unlink with "no such file".
+	forPut := (opts.writePerms != nil) || opts.unlink
 
 	// explain where we are in the current path traversal, only used on errors
 	currentPath := func() proto.KVPath {

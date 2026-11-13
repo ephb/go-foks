@@ -427,7 +427,7 @@ func (k *Minder) PutFileChunk(
 ) error {
 	kvp, _, err := k.initReqWrite(m, cfg)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	us := kvp.caches.upload[id]
@@ -442,17 +442,18 @@ func (k *Minder) PutFileChunk(
 		return core.UploadError("offset mismatch")
 	}
 
+	// Sealing is deterministic (the nonce comes from the file ID, the offset
+	// and the final flag), so a chunk sent again after a failure is
+	// byte-identical, and the server takes it as a replay if the first try
+	// had in fact landed.
 	ulc, sz, err := boxChunk(us.fks, data, id, offset, final, us.sz)
 	if err != nil {
 		return err
 	}
 
-	us.sz = sz
-	us.off += proto.Offset(len(data))
-
-	// Only the RPC is replayed on a stale token, not the chunk bookkeeping above
-	// -- us.off has already advanced, and a rejected upload never reached the
-	// server's chunk state.
+	// Only the RPC is replayed on a stale token. The upload state advances
+	// only once the server has the chunk, so after an error the caller can
+	// send the same chunk at the same offset again.
 	start := time.Now()
 	err = k.withFreshToken(m, kvp, func(m MetaContext) error {
 		auth, client, err := k.client(m, kvp)
@@ -468,6 +469,8 @@ func (k *Minder) PutFileChunk(
 	if err != nil {
 		return err
 	}
+	us.sz = sz
+	us.off += proto.Offset(len(data))
 	end := time.Now()
 	dur := end.Sub(start)
 	rate := fmt.Sprintf("%.5f", float64(len(data))/1000000/dur.Seconds())
