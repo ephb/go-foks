@@ -151,10 +151,10 @@ func loadGCBatch(
 func collectShard(m shared.MetaContext, db *pgxpool.Conn, opts GCOpts) (GCStats, error) {
 	var tot GCStats
 	// Files we looked at and left (skipped or failed), so the next batch
-	// doesn't pick them again.
-	seen := make(map[proto.FileID]bool)
+	// doesn't pick them again. Collected files drop out of the query.
+	left := make(map[proto.FileID]bool)
 	for {
-		batch, err := loadGCBatch(m, db, opts, seen)
+		batch, err := loadGCBatch(m, db, opts, left)
 		if err != nil {
 			return tot, err
 		}
@@ -162,11 +162,13 @@ func collectShard(m shared.MetaContext, db *pgxpool.Conn, opts GCOpts) (GCStats,
 			return tot, nil
 		}
 		for _, c := range batch {
-			seen[c.fid] = true
 			st, err := collectFile(m, db, opts, c)
 			if err != nil {
 				// One bad row must not stop the GC for everyone else.
 				m.Warnw("kv gc", "host", c.shid, "file", c.fid.KVNodeID(), "err", err)
+			}
+			if err != nil || st.Unlinked+st.Uploads == 0 {
+				left[c.fid] = true
 				continue
 			}
 			tot.add(st)
