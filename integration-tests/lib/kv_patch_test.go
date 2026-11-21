@@ -28,8 +28,9 @@ func TestKVStorePatchP1(t *testing.T) {
 			err := db.QueryRow(
 				m.Ctx(),
 				`SELECT COUNT(*) FROM pg_indexes
-				 WHERE tablename = 'large_file'
-				   AND indexname IN ('large_file_gc_unlinked_idx', 'large_file_gc_uploading_idx')`,
+				 WHERE (tablename = 'large_file'
+				   AND indexname IN ('large_file_gc_unlinked_idx', 'large_file_gc_uploading_idx'))
+				    OR (tablename = 'dirent' AND indexname = 'dirent_value_active_idx')`,
 			).Scan(&n)
 			tot += n
 			return err
@@ -44,7 +45,7 @@ func TestKVStorePatchP1(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Greater(t, nShards, 0)
-	require.Equal(t, 2*nShards, gcIndexes(), "a fresh install has the indexes")
+	require.Equal(t, 3*nShards, gcIndexes(), "a fresh install has the indexes")
 
 	run := func() error {
 		eng := &shared.PatchDBEng{
@@ -65,6 +66,7 @@ func TestKVStorePatchP1(t *testing.T) {
 		for _, q := range []string{
 			`DROP INDEX large_file_gc_unlinked_idx`,
 			`DROP INDEX large_file_gc_uploading_idx`,
+			`DROP INDEX dirent_value_active_idx`,
 			`DROP TABLE schema_patches`,
 		} {
 			_, err := db.Exec(m.Ctx(), q)
@@ -79,7 +81,7 @@ func TestKVStorePatchP1(t *testing.T) {
 
 	err = run()
 	require.NoError(t, err)
-	require.Equal(t, 2*nShards, gcIndexes(), "the patch made the indexes")
+	require.Equal(t, 3*nShards, gcIndexes(), "the patch made the indexes")
 
 	err = m.ForAllShards(func(db *pgxpool.Conn) error {
 		var n int

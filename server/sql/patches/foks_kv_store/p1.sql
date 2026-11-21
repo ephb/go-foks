@@ -7,8 +7,12 @@
 -- tombstones of files already collected, which only grow; these two partial
 -- indexes hold only what the GC still has to look at.
 --
--- Safe on a live server: it only adds indexes. Writes to large_file wait
--- while they build, a moment for a table of a few hundred thousand rows.
+-- Before it collects an unlinked file, the GC checks that no live dirent
+-- points at it. dirent had no index by value, so that check read every
+-- dirent of the party; dirent_value_active_idx makes it one lookup.
+--
+-- Safe on a live server: it only adds indexes. Writes to large_file (and to
+-- dirent) wait while they build, a moment for a table of a few hundred thousand rows.
 -- The GC works without them, only more slowly. This is the first patch for
 -- the KV shards; patch-db creates their schema_patches table.
 
@@ -17,3 +21,6 @@ CREATE INDEX large_file_gc_unlinked_idx ON large_file(mtime)
 
 CREATE INDEX large_file_gc_uploading_idx ON large_file(mtime)
     WHERE (status = 'uploading');
+
+CREATE INDEX dirent_value_active_idx ON dirent(short_host_id, short_party_id, value)
+    WHERE (active = true);

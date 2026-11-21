@@ -382,6 +382,21 @@ func usageDecLarge(
 	return nil
 }
 
+// shortPartyIDRange returns the bounds [lo, hi) of the full party IDs that
+// start with spid, as bytea compares them (byte by byte, a prefix first). hi
+// is nil when there is no upper bound (spid is all 0xff).
+func shortPartyIDRange(spid proto.ShortPartyID) (lo []byte, hi []byte) {
+	lo = append([]byte{}, spid[:]...)
+	hi = append([]byte{}, spid[:]...)
+	for i := len(hi) - 1; i >= 0; i-- {
+		hi[i]++
+		if hi[i] != 0 {
+			return lo, hi[:i+1]
+		}
+	}
+	return lo, nil
+}
+
 // partyIDFromShort finds the full party ID behind a short one. The KV tables
 // key on the short ID (the first 17 bytes), but usage keys on the full one,
 // and a party that was charged for a chunk has a usage row. Returns nil when
@@ -391,12 +406,17 @@ func partyIDFromShort(
 	tx pgx.Tx,
 	spid proto.ShortPartyID,
 ) (*proto.PartyID, error) {
-	rows, err := tx.Query(
-		m.Ctx(),
-		`SELECT party_id FROM usage
-		 WHERE short_host_id=$1 AND substring(party_id from 1 for $3) = $2`,
-		int(m.ShortHostID()), spid.ExportToDB(), len(spid),
-	)
+	// A range over the usage key, not substring(): the primary key answers
+	// it, where a function of party_id would read every row of the host.
+	lo, hi := shortPartyIDRange(spid)
+	q := `SELECT party_id FROM usage
+		 WHERE short_host_id=$1 AND party_id >= $2`
+	args := []any{int(m.ShortHostID()), lo}
+	if hi != nil {
+		q += ` AND party_id < $3`
+		args = append(args, hi)
+	}
+	rows, err := tx.Query(m.Ctx(), q, args...)
 	if err != nil {
 		return nil, err
 	}
