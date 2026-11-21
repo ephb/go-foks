@@ -76,6 +76,9 @@ type GlobalContext struct {
 	// Wakes parked rtPollInbox long-pollers on committed inbox bumps.
 	rtInboxHub *RTInboxHub
 
+	// Hands typing states (rtSetTyping) to parked rtPollInbox long-pollers.
+	rtTypingHub *RTTypingHub
+
 	// A lot of services might need to poll the Merkle Query service. Available here
 	merkleGCli *BackendClient
 
@@ -156,6 +159,7 @@ func NewGlobalContext(opts *GlobalContextOpts) *GlobalContext {
 		oauth2ConfigSet: sso.NewOAuth2ConfigSet(),
 		ahtMgr:          NewAdHocTeamNamesManager(),
 		rtInboxHub:      NewRTInboxHub(),
+		rtTypingHub:     NewRTTypingHub(),
 	}
 }
 
@@ -190,6 +194,12 @@ func (g *GlobalContext) RTInboxHub() *RTInboxHub {
 	g.RLock()
 	defer g.RUnlock()
 	return g.rtInboxHub
+}
+
+func (g *GlobalContext) RTTypingHub() *RTTypingHub {
+	g.RLock()
+	defer g.RUnlock()
+	return g.rtTypingHub
 }
 
 func (g *GlobalContext) SetVanityHelper(v VanityHelper) {

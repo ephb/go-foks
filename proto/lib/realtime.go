@@ -1729,11 +1729,15 @@ func (r RTThreadDir) Export() *RTThreadDirInternal__ {
 type RTInboxPollRes struct {
 	Bumped       bool
 	InboxVersion RTInboxVersion
+	Typing       []RTTyping
+	TypingCursor RTTypingCursor
 }
 type RTInboxPollResInternal__ struct {
 	_struct      struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
 	Bumped       *bool
 	InboxVersion *RTInboxVersionInternal__
+	Typing       *[](*RTTypingInternal__)
+	TypingCursor *RTTypingCursorInternal__
 }
 
 func (r RTInboxPollResInternal__) Import() RTInboxPollRes {
@@ -1750,12 +1754,47 @@ func (r RTInboxPollResInternal__) Import() RTInboxPollRes {
 			}
 			return x.Import()
 		})(r.InboxVersion),
+		Typing: (func(x *[](*RTTypingInternal__)) (ret []RTTyping) {
+			if x == nil || len(*x) == 0 {
+				return nil
+			}
+			ret = make([]RTTyping, len(*x))
+			for k, v := range *x {
+				if v == nil {
+					continue
+				}
+				ret[k] = (func(x *RTTypingInternal__) (ret RTTyping) {
+					if x == nil {
+						return ret
+					}
+					return x.Import()
+				})(v)
+			}
+			return ret
+		})(r.Typing),
+		TypingCursor: (func(x *RTTypingCursorInternal__) (ret RTTypingCursor) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.TypingCursor),
 	}
 }
 func (r RTInboxPollRes) Export() *RTInboxPollResInternal__ {
 	return &RTInboxPollResInternal__{
 		Bumped:       &r.Bumped,
 		InboxVersion: r.InboxVersion.Export(),
+		Typing: (func(x []RTTyping) *[](*RTTypingInternal__) {
+			if len(x) == 0 {
+				return nil
+			}
+			ret := make([](*RTTypingInternal__), len(x))
+			for k, v := range x {
+				ret[k] = v.Export()
+			}
+			return &ret
+		})(r.Typing),
+		TypingCursor: r.TypingCursor.Export(),
 	}
 }
 func (r *RTInboxPollRes) Encode(enc rpc.Encoder) error {
@@ -1773,6 +1812,98 @@ func (r *RTInboxPollRes) Decode(dec rpc.Decoder) error {
 }
 
 func (r *RTInboxPollRes) Bytes() []byte { return nil }
+
+type RTTypingCursor uint64
+type RTTypingCursorInternal__ uint64
+
+func (r RTTypingCursor) Export() *RTTypingCursorInternal__ {
+	tmp := ((uint64)(r))
+	return ((*RTTypingCursorInternal__)(&tmp))
+}
+func (r RTTypingCursorInternal__) Import() RTTypingCursor {
+	tmp := (uint64)(r)
+	return RTTypingCursor((func(x *uint64) (ret uint64) {
+		if x == nil {
+			return ret
+		}
+		return *x
+	})(&tmp))
+}
+
+func (r *RTTypingCursor) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RTTypingCursor) Decode(dec rpc.Decoder) error {
+	var tmp RTTypingCursorInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r RTTypingCursor) Bytes() []byte {
+	return nil
+}
+
+type RTTyping struct {
+	Chid RTChannelIDShort
+	Uid  UID
+	Ttl  DurationMilli
+}
+type RTTypingInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Chid    *RTChannelIDShortInternal__
+	Uid     *UIDInternal__
+	Ttl     *DurationMilliInternal__
+}
+
+func (r RTTypingInternal__) Import() RTTyping {
+	return RTTyping{
+		Chid: (func(x *RTChannelIDShortInternal__) (ret RTChannelIDShort) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.Chid),
+		Uid: (func(x *UIDInternal__) (ret UID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.Uid),
+		Ttl: (func(x *DurationMilliInternal__) (ret DurationMilli) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.Ttl),
+	}
+}
+func (r RTTyping) Export() *RTTypingInternal__ {
+	return &RTTypingInternal__{
+		Chid: r.Chid.Export(),
+		Uid:  r.Uid.Export(),
+		Ttl:  r.Ttl.Export(),
+	}
+}
+func (r *RTTyping) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RTTyping) Decode(dec rpc.Decoder) error {
+	var tmp RTTypingInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *RTTyping) Bytes() []byte { return nil }
 
 type RTMsgCached struct {
 	Md  RTMsgNoncer

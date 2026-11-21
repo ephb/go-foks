@@ -163,6 +163,11 @@ func (c *ClientConn) RtSetChannelArchived(ctx context.Context, arg rem.RtSetChan
 	return SetChannelArchived(m, arg)
 }
 
+func (c *ClientConn) RtSetTyping(ctx context.Context, arg rem.RtSetTypingArg) error {
+	m := shared.NewMetaContextConn(ctx, c)
+	return SetTyping(m, arg)
+}
+
 var _ shared.RPCServer = (*Server)(nil)
 
 var _ rem.RealTimeInterface = (*ClientConn)(nil)

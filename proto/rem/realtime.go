@@ -281,15 +281,19 @@ func (r *RTReadThroughArg) Decode(dec rpc.Decoder) error {
 func (r *RTReadThroughArg) Bytes() []byte { return nil }
 
 type RTPollInboxArg struct {
-	AppID   lib.RTAppID
-	Since   lib.RTInboxVersion
-	Timeout lib.DurationMilli
+	AppID       lib.RTAppID
+	Since       lib.RTInboxVersion
+	Timeout     lib.DurationMilli
+	Typing      bool
+	TypingSince lib.RTTypingCursor
 }
 type RTPollInboxArgInternal__ struct {
-	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	AppID   *lib.RTAppIDInternal__
-	Since   *lib.RTInboxVersionInternal__
-	Timeout *lib.DurationMilliInternal__
+	_struct     struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	AppID       *lib.RTAppIDInternal__
+	Since       *lib.RTInboxVersionInternal__
+	Timeout     *lib.DurationMilliInternal__
+	Typing      *bool
+	TypingSince *lib.RTTypingCursorInternal__
 }
 
 func (r RTPollInboxArgInternal__) Import() RTPollInboxArg {
@@ -312,13 +316,27 @@ func (r RTPollInboxArgInternal__) Import() RTPollInboxArg {
 			}
 			return x.Import()
 		})(r.Timeout),
+		Typing: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.Typing),
+		TypingSince: (func(x *lib.RTTypingCursorInternal__) (ret lib.RTTypingCursor) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.TypingSince),
 	}
 }
 func (r RTPollInboxArg) Export() *RTPollInboxArgInternal__ {
 	return &RTPollInboxArgInternal__{
-		AppID:   r.AppID.Export(),
-		Since:   r.Since.Export(),
-		Timeout: r.Timeout.Export(),
+		AppID:       r.AppID.Export(),
+		Since:       r.Since.Export(),
+		Timeout:     r.Timeout.Export(),
+		Typing:      &r.Typing,
+		TypingSince: r.TypingSince.Export(),
 	}
 }
 func (r *RTPollInboxArg) Encode(enc rpc.Encoder) error {
@@ -2409,6 +2427,54 @@ func (r *RtSetChannelArchivedArg) Decode(dec rpc.Decoder) error {
 
 func (r *RtSetChannelArchivedArg) Bytes() []byte { return nil }
 
+type RtSetTypingArg struct {
+	Chid   lib.RTChannelID
+	Typing bool
+}
+type RtSetTypingArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Chid    *lib.RTChannelIDInternal__
+	Typing  *bool
+}
+
+func (r RtSetTypingArgInternal__) Import() RtSetTypingArg {
+	return RtSetTypingArg{
+		Chid: (func(x *lib.RTChannelIDInternal__) (ret lib.RTChannelID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.Chid),
+		Typing: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.Typing),
+	}
+}
+func (r RtSetTypingArg) Export() *RtSetTypingArgInternal__ {
+	return &RtSetTypingArgInternal__{
+		Chid:   r.Chid.Export(),
+		Typing: &r.Typing,
+	}
+}
+func (r *RtSetTypingArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RtSetTypingArg) Decode(dec rpc.Decoder) error {
+	var tmp RtSetTypingArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *RtSetTypingArg) Bytes() []byte { return nil }
+
 type RealTimeInterface interface {
 	RtNewChannel(context.Context, RtNewChannelArg) error
 	RtGetChannel(context.Context, lib.RTChannelID) (RTChannelMetadata, error)
@@ -2428,6 +2494,7 @@ type RealTimeInterface interface {
 	RtNotifyMembers(context.Context, RtNotifyMembersArg) error
 	RtUpdateChannel(context.Context, RtUpdateChannelArg) error
 	RtSetChannelArchived(context.Context, RtSetChannelArchivedArg) error
+	RtSetTyping(context.Context, RtSetTypingArg) error
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h lib.Header) error
 	MakeResHeader() lib.Header
@@ -2854,6 +2921,26 @@ func (c RealTimeClient) RtSetChannelArchived(ctx context.Context, arg RtSetChann
 	}
 	var tmp rpc.DataWrap[lib.Header, interface{}]
 	err = c.Cli.Call2(ctx, rpc.NewMethodV2(RealTimeProtocolID, 17, "RealTime.rtSetChannelArchived"), warg, &tmp, 0*time.Millisecond, realTimeErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	return
+}
+func (c RealTimeClient) RtSetTyping(ctx context.Context, arg RtSetTypingArg) (err error) {
+	warg := &rpc.DataWrap[lib.Header, *RtSetTypingArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[lib.Header, interface{}]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(RealTimeProtocolID, 18, "RealTime.rtSetTyping"), warg, &tmp, 0*time.Millisecond, realTimeErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
 	if err != nil {
 		return
 	}
@@ -3381,6 +3468,34 @@ func RealTimeProtocol(i RealTimeInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "rtSetChannelArchived",
+			},
+			18: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[lib.Header, *RtSetTypingArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[lib.Header, *RtSetTypingArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[lib.Header, *RtSetTypingArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						err := i.RtSetTyping(ctx, (typedArg.Import()))
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[lib.Header, interface{}]{
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "rtSetTyping",
 			},
 		},
 		WrapError: RealTimeMakeGenericErrorWrapper(i.ErrorWrapper()),

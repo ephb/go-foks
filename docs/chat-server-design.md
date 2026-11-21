@@ -629,6 +629,29 @@ going to be intricate rules regarding badging vs muting vs @mentioning
 that we will not cover here. See Slack's legendary flowchart for 
 more details on this sort of logic.
 
+##### Typing Notifications
+
+"Alice is typing" is a hint, so the server never stores it. A client calls
+`rtSetTyping(channel, typing)` when its user starts typing, every few seconds
+while they keep typing, and with `typing=false` when they stop. The server
+authorizes the call exactly as it does `rtSend` (the channel's write role, and
+the channel not archived) and hands the state to the channel's other readers
+through their parked `rtPollInbox` calls. A poll opts in with `typing=true`;
+only such polls are woken, and they return not-bumped with a list of
+(channel, user, time left) and a cursor to pass to the next poll, so that
+each of a user's devices sees every state once. The time left is relative, so
+client and server clocks need not agree. The client drops a state when its
+time runs out; the server forgets it then too.
+
+Everything is in memory (`shared.RTTypingHub`) and bounded: one fan-out of
+"typing" per user and channel every 3 seconds (a call inside that succeeds
+and does nothing), states live 10 seconds, at most 16 typers per channel and
+64 states per recipient, and no fan-out at all to an audience above 256.
+Like the long-poll wake it is in-process only: with several realtime
+processes, typing is not seen across them until the Redis pub/sub of Stage 2c
+carries it. Whether to send typing at all is a client preference; the server
+has no setting for it.
+
 ##### Other Important Features, Not Covered Yet
 
 - Unfurls - the sending client visits a link and embeds an image / snippet with 
@@ -637,8 +660,6 @@ more details on this sort of logic.
     visiting the link on receipt
     - Need a way to disable this feature, or to allow-list only certain
     hosts.
-- Typing notifications
-    - Again we need preferences around making this public or not
 - Giphy
     - Need a secure proxy system so that the users aren't sharing their IP with giphy;
     and especially so that Alice can't force Bob to share his IP with giphy, etc.

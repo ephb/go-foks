@@ -298,6 +298,12 @@ func readChangedChannels(
 // what makes the park race-free: a bump landing between our version read and
 // the select still closes the channel we already hold. Wakes carry no data,
 // so we always re-read the version after one -- a spurious wake just loops.
+//
+// A poll that asked for typing states (arg.Typing) also parks on the
+// RTTypingHub and returns early, not bumped, when one arrives for the caller;
+// see typing.go. That wake does carry its data (the hub holds the states), so
+// it costs no read. Every result of such a poll carries the states newer than
+// arg.TypingSince and the cursor for the next poll.
 func PollInbox(
 	m shared.MetaContext,
 	arg rem.RTPollInboxArg,
@@ -321,6 +327,16 @@ func PollInbox(
 
 	deadline := time.Now().Add(cappedPollTimeout(arg.Timeout))
 
+	thub := m.G().RTTypingHub()
+	// result builds the answer; a poll that did not ask gets no typing.
+	result := func(bumped bool, vers proto.RTInboxVersion) *proto.RTInboxPollRes {
+		ret := proto.RTInboxPollRes{Bumped: bumped, InboxVersion: vers}
+		if arg.Typing {
+			ret.Typing, ret.TypingCursor = thub.Since(key, arg.TypingSince, m.G().Clock().Now())
+		}
+		return &ret
+	}
+
 	// oneRound runs a single subscribe/read/park round, with the subscription
 	// (and the park timer) released via defer on every exit path. A nil, nil
 	// return means "go around again" -- after a wake or the final deadline
@@ -329,22 +345,42 @@ func PollInbox(
 		ch := hub.Subscribe(key)
 		defer hub.Unsubscribe(key, ch)
 
+		// Same subscribe-before-read order for typing. A nil channel never
+		// fires, which is what a poll that did not ask wants.
+		var tch chan struct{}
+		if arg.Typing {
+			tch = thub.Subscribe(key)
+			defer thub.Unsubscribe(key, tch)
+		}
+
 		vers, err := pollInboxOnce(m, arg.AppID)
 		if err != nil {
 			return nil, err
 		}
 		if vers > arg.Since {
-			return &proto.RTInboxPollRes{Bumped: true, InboxVersion: vers}, nil
+			return result(true, vers), nil
+		}
+		res := result(false, vers)
+		if len(res.Typing) > 0 {
+			return res, nil
 		}
 		remain := time.Until(deadline)
 		if remain <= 0 {
-			return &proto.RTInboxPollRes{Bumped: false, InboxVersion: vers}, nil
+			return res, nil
 		}
 		timer := time.NewTimer(remain)
 		defer timer.Stop()
 		select {
 		case <-ch:
 			// Woken; the next round re-reads.
+		case <-tch:
+			// A typing state arrived. The version read above still stands
+			// (ch has not fired), so answer without another read. If the
+			// state ran out in the meantime, go around again.
+			res = result(false, vers)
+			if len(res.Typing) > 0 {
+				return res, nil
+			}
 		case <-m.Ctx().Done():
 			return nil, m.Ctx().Err()
 		case <-timer.C:

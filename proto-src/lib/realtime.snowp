@@ -186,6 +186,25 @@ enum RTThreadDir {
 struct RTInboxPollRes {
     bumped @0 : Bool;                  // false if returned due to timeout
     inboxVersion @1 : RTInboxVersion;  // current head (== since if !bumped)
+    // Only for a poll that asked for typing states: those newer than the
+    // poll's typingSince, and the cursor to pass next time. A poll returns
+    // early for these without a bump. Old servers omit both fields.
+    typing @2 : List(RTTyping);
+    typingCursor @3 : RTTypingCursor;
+}
+
+// Opaque to the client: pass back what the last poll returned; 0 = send
+// every live state.
+typedef RTTypingCursor = Uint;
+
+// "uid is typing in chid", a hint that is never stored. ttl is how much
+// longer it holds, counted from when the server answered (so the two clocks
+// need not agree); the client drops the state when it runs out. ttl 0 means
+// the member stopped.
+struct RTTyping {
+    chid @0 : RTChannelIDShort;
+    uid @1 : UID;
+    ttl @2 : DurationMilli;
 }
 
 // RTMsgCached does know what its sequence is, but we index by seqno,

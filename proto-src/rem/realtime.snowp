@@ -52,6 +52,12 @@ struct RTPollInboxArg {
     appID @0 : lib.RTAppID;
     since @1 : lib.RTInboxVersion;
     timeout @2 : lib.DurationMilli;
+    // Also return, and wake early for, other members' typing states (see
+    // rtSetTyping). typingSince is the typingCursor of the last poll's
+    // result; 0 on the first. A poll that leaves typing false is never woken
+    // by typing.
+    typing @3 : Bool;
+    typingSince @4 : lib.RTTypingCursor;
 }
 
 struct RTLastMsg {
@@ -330,6 +336,21 @@ protocol RealTime
         chid @0 : lib.RTChannelID,
         seqno @1 : lib.RTChannelSeqno,
         archived @2 : Bool
+    );
+
+    // "I am typing in this channel" (typing=true) or "I stopped" (false).
+    // Authorized like rtSend: the channel's write role, and not archived.
+    // Nothing is stored. The server hands the state to the channel's other
+    // readers through their parked rtPollInbox calls (those that asked for
+    // typing), where it expires by itself after about ten seconds; a client
+    // that keeps typing repeats the call. Rate-limited per user and channel:
+    // a call inside the limit succeeds and does nothing, so a client need
+    // not track the limit exactly. Channels with a very large audience are
+    // not fanned out to at all. In-process only, like the long-poll wake:
+    // members whose poll is parked on another server process do not see it.
+    rtSetTyping @18 (
+        chid @0 : lib.RTChannelID,
+        typing @1 : Bool
     );
 
 }
