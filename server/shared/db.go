@@ -155,7 +155,17 @@ func RetryTx2(
 		var succ func(MetaContext)
 		succ, err = tryFn(m, tx)
 		if err != nil {
-			return false, err
+			// Postgres picked this transaction as the victim of a deadlock
+			// or a serialization failure: nothing was written, so the whole
+			// attempt can run again. The deferred rollback ends the aborted
+			// transaction.
+			if !IsTxRestartError(err) {
+				return false, err
+			}
+			m.Warnw("retryTx", "query", nm, "i", i, "err", err)
+			time.Sleep(backoff)
+			backoff *= 2
+			return true, nil
 		}
 		err = tx.Commit(m.Ctx())
 		if err == nil {
@@ -164,7 +174,7 @@ func RetryTx2(
 			}
 			return false, nil
 		}
-		if !pgconn.SafeToRetry(err) {
+		if !pgconn.SafeToRetry(err) && !IsTxRestartError(err) {
 			return false, err
 		}
 		m.Warnw("retryTx", "query", nm, "i", i, "err", err)
@@ -179,6 +189,18 @@ func RetryTx2(
 		}
 	}
 	return core.TxRetryError{}
+}
+
+// IsTxRestartError says whether err is Postgres telling one transaction to
+// start over: a detected deadlock (40P01) or a serialization failure (40001).
+// The server has already rolled such a transaction back, so running it again
+// is safe.
+func IsTxRestartError(err error) bool {
+	var pgerr *pgconn.PgError
+	if !errors.As(err, &pgerr) {
+		return false
+	}
+	return pgerr.Code == "40P01" || pgerr.Code == "40001"
 }
 
 func IsDuplicateKeyError(e error, k string) bool {

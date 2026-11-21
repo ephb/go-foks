@@ -80,6 +80,12 @@ func setChannelFlagsTx(
 		return false, err
 	}
 
+	// Same lock order as a send: the inbox row first (see lockInbox).
+	err = r.lockInbox(m)
+	if err != nil {
+		return false, err
+	}
+
 	// A NULL parameter keeps the column. The IS DISTINCT FROM guard makes a
 	// repeated call a no-op, so it does not churn the inbox version.
 	tag, err := r.tx.Exec(

@@ -188,3 +188,32 @@ func TestRTHiddenUntilNextMessage(t *testing.T) {
 	send(sc.bo, "three")
 	require.False(t, sc.flagsOf(t, sc.bo, sc.chid).Hidden)
 }
+
+// A flag change and a send into the same channel take their row locks in the
+// same order (user_inbox, then user_channels), so neither is aborted as a
+// deadlock victim: every call of both succeeds while they race.
+func TestRTSetChannelFlagsRacesSend(t *testing.T) {
+	sc := setupTypingScene(t)
+	yes := true
+	spec := lcl.NewRTChannelSpecifierWithId(sc.chid)
+	_, err := sc.ada.minder.Send(sc.ada.m, sc.teamCfg(), proto.RTAppID_Chat, spec, []byte("first"))
+	require.NoError(t, err)
+
+	const n = 40
+	sendErr := make(chan error, 1)
+	go func() {
+		for range n {
+			_, err := sc.ada.minder.Send(sc.ada.m, sc.teamCfg(), proto.RTAppID_Chat, spec, []byte("m"))
+			if err != nil {
+				sendErr <- err
+				return
+			}
+		}
+		sendErr <- nil
+	}()
+	// Each send clears hidden again, so most of these are real changes.
+	for range n {
+		require.NoError(t, sc.bo.minder.SetChannelFlagsByID(sc.bo.m, sc.chid, nil, &yes))
+	}
+	require.NoError(t, <-sendErr)
+}

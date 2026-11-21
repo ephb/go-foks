@@ -686,6 +686,11 @@ func (r *readThroughMarker) run(m shared.MetaContext) error {
 		return core.BadArgsError("read-through seq exceeds last message")
 	}
 
+	err = r.lockInbox(m)
+	if err != nil {
+		return err
+	}
+
 	// Advance monotonically. A stale or repeated mark (seq at or below the
 	// current pointer) is a no-op and must NOT bump the inbox version, or
 	// out-of-order marks from racing devices would churn every device's sync.
@@ -725,6 +730,45 @@ func (r *readThroughMarker) run(m shared.MetaContext) error {
 	// row at it, "like a send would do" (chat-server-design.md), so the
 	// caller's other devices pick the read state up on their next sync.
 	return r.stampInbox(m)
+}
+
+// lockInbox locks the caller's user_inbox row without changing it. A send
+// locks rows in the order user_inbox (every member), then user_channels
+// (fanoutInboxVersions). A read mark or a flag change writes the caller's
+// user_channels row and then bumps their user_inbox row (stampInbox); taken
+// in that order the two deadlock with a send into the same channel, and
+// Postgres aborts one of them. So take the inbox lock first, as the send
+// does. A repeated call still bumps nothing.
+//
+// The row is there for anyone with a user_channels row (the channel-creation
+// fanout writes user_inbox first). If it is missing, put one in at version 0,
+// which the send's own insert arm would do at its first bump; the row stays
+// locked by this transaction either way.
+func (r *readThroughMarker) lockInbox(m shared.MetaContext) error {
+	var one int
+	err := r.tx.QueryRow(
+		m.Ctx(),
+		`SELECT 1 FROM user_inbox
+		 WHERE short_host_id=$1 AND uid=$2 AND app_id=$3
+		 FOR UPDATE`,
+		m.ShortHostID(),
+		r.reader.ExportToDB(),
+		r.appID,
+	).Scan(&one)
+	if err != pgx.ErrNoRows {
+		return err
+	}
+	_, err = r.tx.Exec(
+		m.Ctx(),
+		`INSERT INTO user_inbox (short_host_id, uid, app_id, inbox_version, mtime)
+		 VALUES ($1, $2, $3, 0, NOW())
+		 ON CONFLICT (short_host_id, uid, app_id)
+		 DO UPDATE SET mtime = user_inbox.mtime`,
+		m.ShortHostID(),
+		r.reader.ExportToDB(),
+		r.appID,
+	)
+	return err
 }
 
 // stampInbox bumps the caller's global inbox version and stamps their row for
