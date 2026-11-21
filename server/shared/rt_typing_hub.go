@@ -14,6 +14,22 @@ import (
 // Limits of the typing fan-out (rtSetTyping). A typing state is a hint: it
 // is never stored, and everything here is sized so that a hostile client can
 // neither grow this process's memory nor keep other members' polls busy.
+//
+// What is bounded, and by what:
+//
+//   - How often one user wakes the others: once per RTTypingMinInterval per
+//     channel for "typing", once per "typing" for "stopped", and
+//     RTTypingMaxPerSender times per RTTypingMinInterval over all channels.
+//   - How often a recipient's poll returns because of typing alone: once per
+//     RTTypingMinReturnInterval, whoever types (RTTypingHub.ReturnDelay).
+//   - What a call costs the server: one channel row, one membership check
+//     and, when admitted, a roster read of at most RTTypingMaxAudience+2
+//     rows; none of that roster read for RTTypingTooLargeTTL once a channel
+//     was found too large.
+//   - Memory: per channel at most RTTypingMaxPerChannel people typing, one
+//     budget entry per sender, per recipient at most RTTypingMaxPerInbox
+//     states and one poll-return time, one mark per too-large channel; all
+//     of it swept once it ran out.
 const (
 	// RTTypingTTL is how long a typing state holds without being repeated.
 	RTTypingTTL = 10 * time.Second
