@@ -83,7 +83,7 @@ func activeTeamMembers(
 	for i, u := range uids {
 		raw[i] = u.ExportToDB()
 	}
-	return queryActiveTeamMembers(m, db, team, raw)
+	return queryActiveTeamMembers(m, db, team, raw, 0)
 }
 
 // allActiveTeamMembers returns every active, direct, local user member of the
@@ -96,25 +96,60 @@ func allActiveTeamMembers(
 	map[proto.UID]core.RoleKey,
 	error,
 ) {
-	return queryActiveTeamMembers(m, db, team, nil)
+	return queryActiveTeamMembers(m, db, team, nil, 0)
+}
+
+// someActiveTeamMembers is allActiveTeamMembers cut off after limit members
+// (in no useful order). A result of limit rows means there may be more.
+func someActiveTeamMembers(
+	m shared.MetaContext,
+	db shared.Querier,
+	team proto.TeamID,
+	limit int,
+) (
+	map[proto.UID]core.RoleKey,
+	int,
+	error,
+) {
+	return queryActiveTeamMembersCounted(m, db, team, nil, limit)
 }
 
 // queryActiveTeamMembers holds the Stage 1a membership rule for every caller
 // but AuthorizeUserForTeam: direct, local user members (source role Owner,
-// active row), at their latest role. A nil uids matches every member.
+// active row), at their latest role. A nil uids matches every member. A
+// limit above zero cuts the roster off after that many members.
 func queryActiveTeamMembers(
 	m shared.MetaContext,
 	db shared.Querier,
 	team proto.TeamID,
 	uids [][]byte,
+	limit int,
 ) (
 	map[proto.UID]core.RoleKey,
 	error,
 ) {
+	ret, _, err := queryActiveTeamMembersCounted(m, db, team, uids, limit)
+	return ret, err
+}
+
+// queryActiveTeamMembersCounted also returns the number of rows read, which
+// counts members that are not users (and so are not in the map) too.
+func queryActiveTeamMembersCounted(
+	m shared.MetaContext,
+	db shared.Querier,
+	team proto.TeamID,
+	uids [][]byte,
+	limit int,
+) (
+	map[proto.UID]core.RoleKey,
+	int,
+	error,
+) {
 	ret := make(map[proto.UID]core.RoleKey, len(uids))
+	nrows := 0
 	ownerType, ownerViz, err := proto.OwnerRole.ExportToDB()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	rows, err := db.Query(
 		m.Ctx(),
@@ -127,16 +162,18 @@ func queryActiveTeamMembers(
 		 AND src_viz_level=$5
 		 AND active=true
 		 AND ($6::bytea[] IS NULL OR member_id = ANY($6))
-		 ORDER BY member_id, seqno DESC`,
+		 ORDER BY member_id, seqno DESC
+		 LIMIT NULLIF($7::bigint, 0)`,
 		m.ShortHostID(),
 		team.ExportToDB(),
 		shared.ExportHostP(nil),
 		ownerType,
 		ownerViz,
 		uids,
+		int64(limit),
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -144,29 +181,30 @@ func queryActiveTeamMembers(
 		var rt, vl int
 		err = rows.Scan(&memRaw, &rt, &vl)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
+		nrows++
 		var pid proto.PartyID
 		err = pid.ImportFromDB(memRaw)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if !pid.IsUser() {
 			continue
 		}
 		uid, err := pid.UID()
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		rk, err := core.ImportRoleKeyFromDB(rt, vl)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		ret[uid] = *rk
 	}
 	err = rows.Err()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return ret, nil
+	return ret, nrows, nil
 }

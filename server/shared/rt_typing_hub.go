@@ -36,8 +36,13 @@ const (
 	// RTTypingMaxPerInbox caps the states held for one recipient.
 	RTTypingMaxPerInbox = 64
 	// RTTypingMaxAudience is the largest number of readers a typing state is
-	// fanned out to. A channel with more gets none.
+	// fanned out to. A channel with more gets none, and neither does any
+	// channel of a team with more than RTTypingMaxAudience+1 members: the
+	// server reads no more of a roster than that.
 	RTTypingMaxAudience = 256
+	// RTTypingTooLargeTTL is how long the hub remembers that a channel's
+	// audience was too large, so that typing into it costs no roster read.
+	RTTypingTooLargeTTL = time.Minute
 
 	rtTypingSweepEvery = RTTypingTTL
 )
@@ -117,6 +122,8 @@ type RTTypingHub struct {
 	sync.Mutex
 	senders   map[RTTypingChannelKey]map[proto.UID]*rtTypingSender
 	budgets   map[rtTypingBudgetKey]*rtTypingBudget
+	tooLarge  map[RTTypingChannelKey]time.Time // until when Admit refuses
+	maxAud    int
 	returned  map[RTInboxHubKey]time.Time // the last typing-only poll result
 	inboxes   map[RTInboxHubKey]map[rtTypingItemKey]rtTypingItem
 	waiters   map[RTInboxHubKey]map[chan struct{}]bool
@@ -128,6 +135,8 @@ func NewRTTypingHub() *RTTypingHub {
 	return &RTTypingHub{
 		senders:  make(map[RTTypingChannelKey]map[proto.UID]*rtTypingSender),
 		budgets:  make(map[rtTypingBudgetKey]*rtTypingBudget),
+		tooLarge: make(map[RTTypingChannelKey]time.Time),
+		maxAud:   RTTypingMaxAudience,
 		returned: make(map[RTInboxHubKey]time.Time),
 		inboxes:  make(map[RTInboxHubKey]map[rtTypingItemKey]rtTypingItem),
 		waiters:  make(map[RTInboxHubKey]map[chan struct{}]bool),
@@ -144,11 +153,19 @@ func NewRTTypingHub() *RTTypingHub {
 // typing (those who stopped or ran out do not count). "Stopped" is admitted
 // once, and only while the user's "typing" is still live. Either kind is
 // admitted at most RTTypingMaxPerSender times per RTTypingMinInterval per
-// user, over all channels.
+// user, over all channels. Nothing is admitted for a channel marked too
+// large (MarkTooLarge) while the mark holds.
 func (h *RTTypingHub) Admit(k RTTypingChannelKey, uid proto.UID, on bool, now time.Time) bool {
 	h.Lock()
 	defer h.Unlock()
 	h.sweepLocked(now)
+
+	if until, ok := h.tooLarge[k]; ok {
+		if now.Before(until) && !now.Before(until.Add(-RTTypingTooLargeTTL)) {
+			return false
+		}
+		delete(h.tooLarge, k)
+	}
 
 	bk := rtTypingBudgetKey{host: k.HostID, uid: uid}
 	budget := h.budgets[bk]
@@ -203,6 +220,33 @@ func (h *RTTypingHub) Admit(k RTTypingChannelKey, uid proto.UID, on bool, now ti
 	s.on = true
 	spend()
 	return true
+}
+
+// MaxAudience is the largest audience a typing state is fanned out to.
+func (h *RTTypingHub) MaxAudience() int {
+	h.Lock()
+	defer h.Unlock()
+	return h.maxAud
+}
+
+// SetMaxAudienceForTest changes the largest audience and returns the old one.
+func (h *RTTypingHub) SetMaxAudienceForTest(n int) int {
+	h.Lock()
+	defer h.Unlock()
+	old := h.maxAud
+	h.maxAud = n
+	return old
+}
+
+// MarkTooLarge records that the channel's audience is larger than the
+// fan-out allows. For RTTypingTooLargeTTL from now, Admit refuses every state
+// for the channel, so the caller reads the roster at most once in that time.
+// One entry per channel that someone with the right to send typed into; the
+// sweep drops it when it ran out.
+func (h *RTTypingHub) MarkTooLarge(k RTTypingChannelKey, now time.Time) {
+	h.Lock()
+	defer h.Unlock()
+	h.tooLarge[k] = now.Add(RTTypingTooLargeTTL)
 }
 
 // ReturnDelay is how long a poll of k has to hold a result that carries
@@ -401,6 +445,11 @@ func (h *RTTypingHub) sweepLocked(now time.Time) {
 		pruneTypingInbox(box, now)
 		if len(box) == 0 {
 			delete(h.inboxes, k)
+		}
+	}
+	for k, until := range h.tooLarge {
+		if !now.Before(until) || now.Before(until.Add(-RTTypingTooLargeTTL)) {
+			delete(h.tooLarge, k)
 		}
 	}
 	for k, b := range h.budgets {

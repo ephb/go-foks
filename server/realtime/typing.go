@@ -79,7 +79,10 @@ func loadChannelForTyping(
 // channels the caller may write to. A call inside the limit returns nil and
 // does nothing. The audience is read from the team's current roster (members
 // at or above the channel's read role), not from user_channels rows, which
-// outlive a removal from the team.
+// outlive a removal from the team. No more of the roster is read than the
+// largest audience needs: a team past that gets no typing states, and the
+// hub remembers it (shared.RTTypingTooLargeTTL), so that typing into a large
+// channel costs one bounded roster read a minute, not one per call.
 func SetTyping(m shared.MetaContext, arg rem.RtSetTypingArg) error {
 	chid := arg.Chid.Short()
 	ch, err := readChannelForTyping(m, chid)
@@ -121,9 +124,16 @@ func SetTyping(m shared.MetaContext, arg rem.RtSetTypingArg) error {
 	if err != nil {
 		return err
 	}
-	members, err := allActiveTeamMembers(m, userdb, ch.team)
+	// The audience and the caller, and one more row to see that it is over.
+	maxAudience := hub.MaxAudience()
+	limit := maxAudience + 2
+	members, nrows, err := someActiveTeamMembers(m, userdb, ch.team, limit)
 	if err != nil {
 		return err
+	}
+	if nrows >= limit {
+		hub.MarkTooLarge(key, now)
+		return nil
 	}
 	recipients := make([]proto.UID, 0, len(members))
 	for uid, r := range members {
@@ -132,7 +142,11 @@ func SetTyping(m shared.MetaContext, arg rem.RtSetTypingArg) error {
 		}
 		recipients = append(recipients, uid)
 	}
-	if len(recipients) == 0 || len(recipients) > shared.RTTypingMaxAudience {
+	if len(recipients) > maxAudience {
+		hub.MarkTooLarge(key, now)
+		return nil
+	}
+	if len(recipients) == 0 {
 		return nil
 	}
 	hub.Publish(m.ShortHostID(), ch.app, chid, m.UID(), arg.Typing, recipients, now)
