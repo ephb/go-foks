@@ -277,8 +277,40 @@ func (f *fileUploader) lockFile(m shared.MetaContext) (LargeFileStatus, error) {
 	return ParseLargeFileStatus(status)
 }
 
+// checkChunkPerms holds a later chunk to what init held the first one to
+// (checkPerms): the caller must be at or above the file's read role. Without
+// it any member of the party who learned a file ID could write into another
+// member's upload while it runs, and break it or finish it with other bytes.
+// The role is the stored one (the newest key's), not one the caller names.
+func (f *fileUploader) checkChunkPerms(m shared.MetaContext) error {
+	var rt, vl int
+	err := f.tx.QueryRow(
+		m.Ctx(),
+		`SELECT read_role_type, read_role_viz_level FROM large_file_key
+		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3
+		ORDER BY version DESC LIMIT 1`,
+		int(m.HostID().Short), f.pid.Shorten().ExportToDB(), f.fid.ExportToDB(),
+	).Scan(&rt, &vl)
+	if err == pgx.ErrNoRows {
+		return core.UploadError("no such upload")
+	}
+	if err != nil {
+		return err
+	}
+	var fileRole proto.Role
+	err = fileRole.ImportFromDB(rt, vl)
+	if err != nil {
+		return err
+	}
+	return assertAtOrAbove(f.role, fileRole, proto.KVOp_Read, proto.KVNodeType_File)
+}
+
 func (f *fileUploader) doChunk(m shared.MetaContext) error {
 	st, err := f.lockFile(m)
+	if err != nil {
+		return err
+	}
+	err = f.checkChunkPerms(m)
 	if err != nil {
 		return err
 	}
