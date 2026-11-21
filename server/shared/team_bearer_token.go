@@ -345,6 +345,15 @@ func ActivateTeamVOBearerToken(
 			return core.PermissionError("team member permission failed (vo bearer token)")
 		}
 
+		// When the member is a team on this host, the signature is by that
+		// team's key, which a user who left that team still holds until its
+		// admins rotate it. Such a user may not act as the team.
+		err = assertMayActAsMemberTeam(m, tx, arg.Ch.Payload.Req)
+		if err != nil {
+			m.Warnw("ActivateTeamVOBearerToken", "err", err, "stage", "member team")
+			return core.PermissionError("team member permission failed (vo bearer token)")
+		}
+
 		err = insertTeamVOBearerToken(m, tx, arg.Ch.Payload, lRes.seq, *teamID)
 		if err != nil {
 			return err
@@ -475,17 +484,17 @@ func LoadBearerToken(
 	*proto.Role,
 	error,
 ) {
-	var teamidRaw, uidRaw []byte
+	var teamidRaw, uidRaw, holderHostRaw []byte
 	var typ, lev, gen int
 	var ctime time.Time
 	err := q.QueryRow(m.Ctx(),
-		`SELECT team_id, role_type, viz_level, gen, holder_uid, ctime
+		`SELECT team_id, role_type, viz_level, gen, holder_uid, holder_host_id, ctime
 		 FROM team_bearer_tokens
 		 WHERE short_host_id=$1 AND token=$2 AND state=$3`,
 		m.ShortHostID().ExportToDB(),
 		tok.ExportToDB(),
 		team.BearerTokenStateActive,
-	).Scan(&teamidRaw, &typ, &lev, &gen, &uidRaw, &ctime)
+	).Scan(&teamidRaw, &typ, &lev, &gen, &uidRaw, &holderHostRaw, &ctime)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, core.TeamBearerTokenStaleError{Which: "state"}
 	}
@@ -534,6 +543,16 @@ func LoadBearerToken(
 	}
 	if sps.Gen != proto.Generation(gen) {
 		return nil, nil, core.TeamBearerTokenStaleError{Which: "gen"}
+	}
+	// A leave revokes the leaver's tokens; this catches any token whose
+	// holder lost the role some other way while the key stayed.
+	holderHost, err := ImportHost(m, holderHostRaw)
+	if err != nil {
+		return nil, nil, err
+	}
+	err = AssertMayHoldTeamKey(m, q, teamID, uid, holderHost, role, sps.Gen)
+	if err != nil {
+		return nil, nil, err
 	}
 	return &teamID, &role, nil
 }
@@ -586,6 +605,12 @@ func ActivateTeamBearerToken(
 	}
 
 	err = sps.Verify(arg.Sig, &arg.Bl)
+	if err != nil {
+		return err
+	}
+	// The signature says the holder has the key, not that they may still
+	// use it: a member who left keeps the keys until an admin rotates them.
+	err = AssertMayHoldTeamKey(m, tx, obj.Team, uid, obj.User.HostID, obj.Role, sps.Gen)
 	if err != nil {
 		return err
 	}

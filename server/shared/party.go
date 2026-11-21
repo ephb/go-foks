@@ -130,5 +130,16 @@ func checkActsForTeam(
 	if err != nil {
 		return err
 	}
-	return nil
+	// The signature says the signer has the team's admin key, not that
+	// they may still act for the team: a member who left keeps the keys
+	// until an admin rotates them. The connection's user is the signer.
+	if m.UID().IsZero() {
+		return core.NeedLoginError{}
+	}
+	db, err := m.Db(DbTypeUsers)
+	if err != nil {
+		return err
+	}
+	defer db.Release()
+	return AssertMayHoldTeamKey(m, db, teamid, m.UID(), m.HostID().Id, sig.Role, sig.Gen)
 }

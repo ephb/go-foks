@@ -12,6 +12,7 @@ import (
 	"github.com/foks-proj/go-foks/lib/team"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
+	"github.com/foks-proj/go-foks/proto/rem"
 	"github.com/stretchr/testify/require"
 )
 
@@ -263,4 +264,109 @@ func TestTeamLeaveAdmin(t *testing.T) {
 	require.Contains(t, res.Rotated, core.MemberRole)
 	f.tew.DirectDoubleMerklePokeInTest(t)
 	require.Empty(t, f.due(t, f.bob))
+}
+
+// currentKey: p's current key for role in the team, from p's own load.
+func (f *leaveFixture) currentKey(t *testing.T, p leaveParty, role core.RoleKey) core.SharedPrivateSuiter {
+	tr, err := p.tm.LoadTeamWithFQTeam(p.m, f.fqt, libclient.LoadTeamOpts{Refresh: true})
+	require.NoError(t, err)
+	ks := tr.Tw().KeyRing().KeysForRole(role)
+	require.NotNil(t, ks)
+	ret := ks.Current()
+	require.NotNil(t, ret)
+	return ret
+}
+
+// mintToken: what a client does to get a team bearer token with key ptk
+// (MakeInertTeamBearerToken, then ActivateTeamBearerToken signed by ptk).
+func (f *leaveFixture) mintToken(t *testing.T, p leaveParty, ptk core.SharedPrivateSuiter) (*rem.TeamBearerToken, error) {
+	au := p.m.G().ActiveUser()
+	cli, err := au.TeamAdminClient(p.m)
+	require.NoError(t, err)
+	tok, err := cli.MakeInertTeamBearerToken(p.m.Ctx(), rem.MakeInertTeamBearerTokenArg{
+		Team: f.fqt.Team,
+		Role: ptk.GetRole(),
+		Gen:  ptk.Metadata().Gen,
+	})
+	if err != nil {
+		return nil, err
+	}
+	sig, obj, err := team.SignBearerTokenChallenge(au.FQU(), f.fqt.Team, ptk.GetRole(),
+		ptk.Metadata().Gen, tok, ptk)
+	require.NoError(t, err)
+	err = cli.ActivateTeamBearerToken(p.m.Ctx(), rem.ActivateTeamBearerTokenArg{Bl: obj, Sig: *sig})
+	if err != nil {
+		return nil, err
+	}
+	return &tok, nil
+}
+
+// grantView: acting for the team with key ptk, grant p's own user a view
+// permission on it (what an admin's client does for a joining team).
+func (f *leaveFixture) grantView(t *testing.T, p leaveParty, ptk core.SharedPrivateSuiter) error {
+	au := p.m.G().ActiveUser()
+	payload := rem.GrantRemoteViewPermissionPayload{
+		Viewee: f.fqt.Team.ToPartyID(),
+		Viewer: au.FQU().FQParty(),
+		Tm:     proto.Now(),
+	}
+	sig, err := ptk.Sign(&payload)
+	require.NoError(t, err)
+	cli, err := au.TeamMemberClient(p.m)
+	require.NoError(t, err)
+	_, err = cli.GrantRemoteViewPermissionForTeam(p.m.Ctx(), rem.GrantRemoteViewPermissionForTeamArg{
+		P: payload,
+		Sig: rem.SharedKeySig{
+			Role: ptk.GetRole(),
+			Gen:  ptk.Metadata().Gen,
+			Sig:  *sig,
+		},
+	})
+	return err
+}
+
+func requirePermissionError(t *testing.T, err error) {
+	require.Error(t, err)
+	var pe core.PermissionError
+	require.True(t, errors.As(err, &pe), "want a PermissionError, got %T %v", err, err)
+}
+
+// An admin who left still holds the admin key until it is rotated. The
+// server must not take a signature by it as the admin's: no new admin
+// token, no acting for the team. Current admins are not affected, and the
+// rotation ends it (the old key no longer signs anything current).
+func TestTeamLeaveAdminKeyIsNotEnough(t *testing.T) {
+	f := newLeaveFixture(t)
+
+	carolKey := f.currentKey(t, f.carol, core.AdminRole)
+	_, err := f.mintToken(t, f.carol, carolKey)
+	require.NoError(t, err, "an admin can make a token before leaving")
+	require.NoError(t, f.grantView(t, f.carol, carolKey))
+
+	err = f.leave(t, f.carol)
+	require.NoError(t, err)
+	require.Contains(t, f.due(t, f.alice), core.AdminRole)
+
+	// carol, out of the team, with the admin key she kept.
+	_, err = f.mintToken(t, f.carol, carolKey)
+	requirePermissionError(t, err)
+	err = f.grantView(t, f.carol, carolKey)
+	requirePermissionError(t, err)
+
+	// alice (owner) holds the same admin key generation and still can.
+	aliceKey := f.currentKey(t, f.alice, core.AdminRole)
+	require.Equal(t, carolKey.Metadata().Gen, aliceKey.Metadata().Gen)
+	_, err = f.mintToken(t, f.alice, aliceKey)
+	require.NoError(t, err)
+	require.NoError(t, f.grantView(t, f.alice, aliceKey))
+
+	// The rotation: alice's new admin key works, carol's old one is stale.
+	res, err := f.alice.tm.RotateKeysIfDue(f.alice.m, f.fqt)
+	require.NoError(t, err)
+	require.Contains(t, res.Rotated, core.AdminRole)
+	f.tew.DirectDoubleMerklePokeInTest(t)
+	_, err = f.mintToken(t, f.alice, f.currentKey(t, f.alice, core.AdminRole))
+	require.NoError(t, err)
+	_, err = f.mintToken(t, f.carol, carolKey)
+	require.Error(t, err)
 }
