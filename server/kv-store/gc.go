@@ -75,12 +75,33 @@ func CollectGarbage(m shared.MetaContext, opts GCOpts) (GCStats, error) {
 	if opts.BatchSize <= 0 {
 		opts.BatchSize = shared.DefaultKVGCConfig().BatchSize
 	}
-	err := m.ForAllShards(func(db *pgxpool.Conn) error {
-		st, err := collectShard(m, db, opts)
+	// Not ForAllShards: that stops at the first shard that fails, and one
+	// shard that is down or damaged must not keep the others from being
+	// collected. Log it, go on, and report the last failure.
+	iter, err := m.G().KVShardMgr().GetAllConns(m)
+	if err != nil {
+		return tot, err
+	}
+	defer iter.Close()
+	var last error
+	for i := 0; iter.Next(); i++ {
+		st, err := collectNextShard(m, iter, opts)
 		tot.add(st)
-		return err
-	})
-	return tot, err
+		if err != nil {
+			m.Warnw("kv gc: a shard failed; going on with the next", "shardIndex", i, "err", err)
+			last = err
+		}
+	}
+	return tot, last
+}
+
+func collectNextShard(m shared.MetaContext, iter *shared.ConnIter, opts GCOpts) (GCStats, error) {
+	db, _, err := iter.Conn(m)
+	if err != nil {
+		return GCStats{}, err
+	}
+	defer db.Release()
+	return collectShard(m, db, opts)
 }
 
 type gcCandidate struct {
@@ -94,13 +115,16 @@ func secs(d time.Duration) float64 { return d.Seconds() }
 
 // loadGCBatch picks up to n candidates, oldest first. Each kind has its own
 // partial index (patch foks_kv_store p1), so neither scan walks the
-// tombstones of files already collected.
+// tombstones of files already collected. A row that cannot be read (an ID of
+// the wrong length) is logged and left, and counted in bad, so the caller
+// can look past it: it must not stop the collection of everything else.
 func loadGCBatch(
 	m shared.MetaContext,
 	db *pgxpool.Conn,
 	opts GCOpts,
 	skip map[proto.FileID]bool,
-) ([]gcCandidate, error) {
+	skipBad int,
+) (ret []gcCandidate, bad int, err error) {
 	rows, err := db.Query(
 		m.Ctx(),
 		`(SELECT short_host_id, short_party_id, file_id, false
@@ -116,28 +140,33 @@ func loadGCBatch(
 		  ORDER BY mtime ASC LIMIT $3)`,
 		secs(opts.UnlinkedGrace),
 		secs(opts.UploadGrace),
-		opts.BatchSize+len(skip),
+		opts.BatchSize+len(skip)+skipBad,
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
-	var ret []gcCandidate
 	for rows.Next() {
 		var shid int
 		var spid, fid []byte
 		var c gcCandidate
 		err = rows.Scan(&shid, &spid, &fid, &c.isUpl)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if len(spid) != len(c.spid) {
-			return nil, core.BadServerDataError("short party id")
+			bad++
+			m.Warnw("kv gc: skipping a large_file row with a bad short party id",
+				"host", shid, "party", spid, "file", fid)
+			continue
 		}
 		copy(c.spid[:], spid)
 		err = c.fid.ImportFromDB(fid)
 		if err != nil {
-			return nil, err
+			bad++
+			m.Warnw("kv gc: skipping a large_file row with a bad file id",
+				"host", shid, "party", spid, "file", fid, "err", err)
+			continue
 		}
 		if skip[c.fid] {
 			continue
@@ -145,7 +174,7 @@ func loadGCBatch(
 		c.shid = core.ShortHostID(shid)
 		ret = append(ret, c)
 	}
-	return ret, rows.Err()
+	return ret, bad, rows.Err()
 }
 
 func collectShard(m shared.MetaContext, db *pgxpool.Conn, opts GCOpts) (GCStats, error) {
@@ -153,10 +182,20 @@ func collectShard(m shared.MetaContext, db *pgxpool.Conn, opts GCOpts) (GCStats,
 	// Files we looked at and left (skipped or failed), so the next batch
 	// doesn't pick them again. Collected files drop out of the query.
 	left := make(map[proto.FileID]bool)
+	// Unreadable rows stay in the query's result too; look past as many as
+	// the last batch held.
+	var bad int
 	for {
-		batch, err := loadGCBatch(m, db, opts, left)
+		batch, nBad, err := loadGCBatch(m, db, opts, left, bad)
 		if err != nil {
 			return tot, err
+		}
+		if nBad > bad {
+			// More of them than we looked past: ask again, further.
+			bad = nBad
+			if len(batch) == 0 {
+				continue
+			}
 		}
 		if len(batch) == 0 {
 			return tot, nil

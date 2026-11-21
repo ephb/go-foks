@@ -19,8 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The GC tests run passes with the default graces (1 hour unlinked, 24
-// hours uploading) and age the file under test by moving its mtime back,
+// The GC tests run passes with their own graces (gcTestOpts: 1 hour
+// unlinked, 24 hours uploading) and age the file under test by moving its mtime back,
 // so that files other tests left behind are never old enough to be touched.
 
 type gcFixture struct {
@@ -68,12 +68,18 @@ func (f *gcFixture) fileID(t *testing.T, path proto.KVPath) proto.FileID {
 	return *gfr.Id
 }
 
-// gc runs one pass with the default graces.
+// gcTestOpts are the graces the tests run with: 1 hour unlinked, 24 hours
+// uploading.
+func gcTestOpts() kvStore.GCOpts {
+	opts := kvStore.GCOptsFromConfig(shared.DefaultKVGCConfig())
+	opts.UnlinkedGrace = time.Hour
+	opts.UploadGrace = 24 * time.Hour
+	return opts
+}
+
+// gc runs one pass with the test graces.
 func (f *gcFixture) gc(t *testing.T) kvStore.GCStats {
-	st, err := kvStore.CollectGarbage(
-		f.tew.MetaContext(),
-		kvStore.GCOptsFromConfig(shared.DefaultKVGCConfig()),
-	)
+	st, err := kvStore.CollectGarbage(f.tew.MetaContext(), gcTestOpts())
 	require.NoError(t, err)
 	return st
 }
@@ -384,4 +390,49 @@ func TestKVFileChunkReplay(t *testing.T) {
 	err = chunk(c2, 8192, true)
 	require.Error(t, err)
 	require.IsType(t, core.UploadError(""), err)
+}
+
+// A large_file row the GC cannot read (an ID of the wrong length) is logged
+// and skipped: the pass still collects the files next to it, and reports no
+// error.
+func TestKVGCSkipsBadRow(t *testing.T) {
+	f := newGCFixture(t)
+	m := f.tew.MetaContext()
+	badFid := []byte{0xba, 0xd0, 0x01}
+	ins := func(db *pgxpool.Conn) error {
+		_, err := db.Exec(m.Ctx(),
+			`INSERT INTO large_file (short_host_id, short_party_id, file_id, size,
+			     refcount, status, storage_type, ctime, mtime)
+			 VALUES ($1, $2, $3, 0, 0, 'active', 'sql',
+			     NOW() - interval '900 days', NOW() - interval '900 days'),
+			        ($1, $3, $2, 0, 0, 'uploading', 'sql',
+			     NOW() - interval '900 days', NOW() - interval '900 days')
+			 ON CONFLICT DO NOTHING`,
+			int(m.ShortHostID()), []byte{1, 2, 3}, badFid,
+		)
+		return err
+	}
+	require.NoError(t, m.ForAllShards(ins))
+	t.Cleanup(func() {
+		_ = m.ForAllShards(func(db *pgxpool.Conn) error {
+			_, err := db.Exec(m.Ctx(),
+				`DELETE FROM large_file WHERE file_id IN ($1, $2)`, badFid, []byte{1, 2, 3})
+			return err
+		})
+	})
+
+	path := f.path("next-to-a-bad-row")
+	writeRandomFileWithConfig(t, f.kvm, f.m, path, 3*testChunkSize,
+		lcl.KVConfig{MkdirP: true}, 0)
+	fid := f.fileID(t, path)
+	require.NoError(t, f.kvm.Unlink(f.m, lcl.KVConfig{}, path))
+	f.age(t, fid, 2*time.Hour)
+
+	// One file per batch, so the bad rows (the oldest) fill whole batches.
+	opts := gcTestOpts()
+	opts.BatchSize = 1
+	st, err := kvStore.CollectGarbage(m, opts)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, st.Unlinked, 1)
+	f.requireCollected(t, fid)
 }
