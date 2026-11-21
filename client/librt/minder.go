@@ -1992,6 +1992,39 @@ func (d *Minder) GetThreadView(
 	*lcl.RTThreadView,
 	error,
 ) {
+	return d.getThreadView(m, team, appID, channel, before, num, true)
+}
+
+// GetThreadViewNoMark is GetThreadView without the read mark: the read
+// pointer stays where it is. For callers that load a page the user may not
+// be looking at (a background refresh, a bot) and that call ReadThrough
+// themselves once the messages were seen.
+func (d *Minder) GetThreadViewNoMark(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+	before proto.RTMsgSeq,
+	num uint,
+) (
+	*lcl.RTThreadView,
+	error,
+) {
+	return d.getThreadView(m, team, appID, channel, before, num, false)
+}
+
+func (d *Minder) getThreadView(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+	before proto.RTMsgSeq,
+	num uint,
+	markRead bool,
+) (
+	*lcl.RTThreadView,
+	error,
+) {
 	err := assertTeam(team)
 	if err != nil {
 		return nil, err
@@ -2043,8 +2076,9 @@ func (d *Minder) GetThreadView(
 	// newest message shown, so unread counts (and the viewer's other devices)
 	// catch up on the next inbox sync. The pointer is monotonic server-side --
 	// stale marks no-op -- so paging back through history never regresses it.
-	// Best-effort: the read itself already succeeded.
-	if len(msgs) > 0 {
+	// Best-effort: the read itself already succeeded. GetThreadViewNoMark
+	// skips it.
+	if markRead && len(msgs) > 0 {
 		maxSeq := msgs[0].Seq
 		for i := range msgs[1:] {
 			maxSeq = max(maxSeq, msgs[i+1].Seq)
