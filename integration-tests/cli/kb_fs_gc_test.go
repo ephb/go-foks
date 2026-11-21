@@ -153,5 +153,5 @@ func TestKbCLIFsFreesSpace(t *testing.T) {
 	require.False(t, f.OK, "a collected file was fetched")
 	t.Logf("bob's fetch of the collected file: %+v", f.Error)
 	require.Equal(t, "rejected", f.Error.Code)
-	require.Contains(t, f.Error.Message, "no longer on the server")
+	require.Equal(t, "This file was deleted.", f.Error.Message)
 }
