@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/foks-proj/go-foks/lib/core"
+	kvStore "github.com/foks-proj/go-foks/server/kv-store"
 	"github.com/foks-proj/go-foks/server/shared"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -79,7 +80,18 @@ func TestKVStorePatchP1(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, gcIndexes())
 
+	// The garbage collector refuses a shard without the patch, and says
+	// what to run.
+	gcOpts := kvStore.GCOptsFromConfig(shared.DefaultKVGCConfig())
+	st, err := kvStore.CollectGarbage(m, gcOpts)
+	require.Error(t, err)
+	require.IsType(t, core.ConfigError(""), err)
+	require.Contains(t, err.Error(), "patch-db --db kv-store")
+	require.Equal(t, kvStore.GCStats{}, st)
+
 	err = run()
+	require.NoError(t, err)
+	_, err = kvStore.CollectGarbage(m, gcOpts)
 	require.NoError(t, err)
 	require.Equal(t, 3*nShards, gcIndexes(), "the patch made the indexes")
 

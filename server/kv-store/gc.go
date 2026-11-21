@@ -192,9 +192,43 @@ func loadGCBatch(
 	return ret, bad, rows.Err()
 }
 
+// gcPatchID is the foks_kv_store schema patch the GC needs: its indexes
+// (and the shards' schema_patches table, which that patch run creates).
+const gcPatchID = 1
+
+// checkGCPatch refuses a shard that has not had patch p1. Without its
+// indexes every pass would scan all of large_file, and for each file all of
+// the party's dirents, under the file's row lock.
+func checkGCPatch(m shared.MetaContext, db *pgxpool.Conn) error {
+	var ok bool
+	err := db.QueryRow(m.Ctx(), `SELECT to_regclass('schema_patches') IS NOT NULL`).Scan(&ok)
+	if err != nil {
+		return err
+	}
+	if ok {
+		err = db.QueryRow(
+			m.Ctx(),
+			`SELECT EXISTS(SELECT 1 FROM schema_patches WHERE id=$1)`,
+			gcPatchID,
+		).Scan(&ok)
+		if err != nil {
+			return err
+		}
+	}
+	if !ok {
+		return core.ConfigError("this KV shard does not have database patch p1, which the " +
+			"garbage collector needs; not collecting it. Run: foks-tool patch-db --db kv-store")
+	}
+	return nil
+}
+
 // collectShard collects up to budget files on one shard.
 func collectShard(m shared.MetaContext, db *pgxpool.Conn, opts GCOpts, budget int) (GCStats, error) {
 	var tot GCStats
+	err := checkGCPatch(m, db)
+	if err != nil {
+		return tot, err
+	}
 	// Files we looked at and left (skipped or failed), so the next batch
 	// doesn't pick them again. Collected files drop out of the query.
 	left := make(map[proto.FileID]bool)
