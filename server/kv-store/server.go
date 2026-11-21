@@ -273,11 +273,21 @@ func (c *ClientConn) KvMkdir(ctx context.Context, arg rem.KvMkdirArg) (rem.KVMkd
 }
 
 func (c *ClientConn) KvPut(ctx context.Context, arg rem.KvPutArg) error {
-	return c.preamble(ctx, arg.Hdr,
-		func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, role proto.Role) error {
+	return c.authActor(ctx, arg.Hdr.Auth,
+		func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, role proto.Role, actor proto.FQParty) error {
+			err := checkVersionVector(m, db, pid, role, arg.Hdr.Precondition)
+			if err != nil {
+				return err
+			}
+			// Outside the transaction: a catalog read, cached.
+			withWriter, err := hasWriterColumn(m, db)
+			if err != nil {
+				return err
+			}
+			lnk := linker{actor: actor, role: role, withWriter: withWriter}
 			return shared.RetryTx(m, db, "kvPut",
 				func(m shared.MetaContext, tx pgx.Tx) error {
-					return putDirent(m, tx, pid, role, arg)
+					return putDirent(m, tx, pid, role, lnk, arg)
 				})
 		})
 }

@@ -150,6 +150,23 @@ func (k *Minder) putSymlink(
 	)
 }
 
+// LinkNode gives a node that already exists (a file, by its ID) the name at
+// path, as a move does for the destination but without unlinking anything.
+// The server allows it only for a file the caller uploaded, or for an
+// admin, and never for a file whose last name was removed.
+func (k *Minder) LinkNode(
+	m MetaContext,
+	cfg lcl.KVConfig,
+	path proto.KVPath,
+	id proto.KVNodeID,
+) (*PutFileRes, error) {
+	return k.putFile(m, cfg, path,
+		func(kvp *KVParty, rp *proto.RolePair) (*proto.KVNodeID, func(m MetaContext) error, error) {
+			return &id, nil, nil
+		},
+	)
+}
+
 type PutFileOpts struct {
 	Version *proto.KVVersion // Assert existing version.
 }

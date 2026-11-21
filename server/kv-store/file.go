@@ -16,45 +16,149 @@ import (
 	"golang.org/x/crypto/nacl/secretbox"
 )
 
+// linker is who adds links in a KvPut: the acting member (authActor), their
+// role in the store, and whether the shard records writers (patch p2).
+type linker struct {
+	actor      proto.FQParty
+	role       proto.Role
+	withWriter bool
+}
+
+// fileLink checks a new link to a large file, with its row locked:
+//
+//   - A file the GC collected is gone (KVNoentError).
+//   - A file with a recorded writer may be linked only by that writer or by
+//     an admin of the store. Otherwise any member who learned a file ID
+//     could give someone else's file a name of their own, and the owner's
+//     delete (an unlink of the owner's name) would leave it served. So a
+//     non-admin can't move (mv) another member's file either. A file with no
+//     writer (uploaded before patch p2) is not judged on this.
+//   - A file that was linked and no longer is (refcount 0, no active dirent:
+//     assertLinked) was deleted, and linking it again would serve it again.
+//     Refused, except for its first link: an upload is active with refcount
+//     0 between its last chunk and its name when it fits one chunk. A first
+//     link is told apart by the writer making it, or, with no writer
+//     recorded, by mtime still being ctime (only links, unlinks and chunks
+//     move mtime; a single-chunk upload is written in one transaction).
+//   - A file still being uploaded is linkable (a multi-chunk upload is
+//     linked after its first chunk).
+func fileLink(
+	m shared.MetaContext,
+	tx pgx.Tx,
+	pid proto.PartyID,
+	id proto.FileID,
+	lnk linker,
+) error {
+	q := `SELECT status, refcount, ctime = mtime`
+	if lnk.withWriter {
+		q += `, writer`
+	}
+	q += ` FROM large_file
+		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3
+		FOR UPDATE`
+	var status string
+	var refcount int
+	var fresh bool
+	var rawWriter []byte
+	dst := []any{&status, &refcount, &fresh}
+	if lnk.withWriter {
+		dst = append(dst, &rawWriter)
+	}
+	err := tx.QueryRow(
+		m.Ctx(), q,
+		int(m.HostID().Short), pid.Shorten().ExportToDB(), id.ExportToDB(),
+	).Scan(dst...)
+	if err == pgx.ErrNoRows {
+		return core.UpdateError("large_file")
+	}
+	if err != nil {
+		return err
+	}
+	st, err := ParseLargeFileStatus(status)
+	if err != nil {
+		return err
+	}
+	if st == LargeFileStatusDead {
+		return core.KVNoentError{}
+	}
+	var isWriter bool
+	if rawWriter != nil {
+		var w proto.FQParty
+		err = core.DecodeFromBytes(&w, rawWriter)
+		if err != nil {
+			return err
+		}
+		isWriter = w.Eq(lnk.actor)
+		if !isWriter {
+			admin, err := lnk.role.IsAdminOrAbove()
+			if err != nil {
+				return err
+			}
+			if !admin {
+				return core.PermissionError(
+					"only the member who uploaded a file, or an admin, can give it another name")
+			}
+		}
+	}
+	if st == LargeFileStatusActive && refcount <= 0 && !isWriter && !(rawWriter == nil && fresh) {
+		err = assertLinked(m, tx, pid, id.KVNodeID(), refcount)
+		if err != nil {
+			return err
+		}
+	}
+	tag, err := tx.Exec(
+		m.Ctx(),
+		`UPDATE large_file SET refcount=refcount+1, mtime=NOW()
+		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3`,
+		int(m.HostID().Short), pid.Shorten().ExportToDB(), id.ExportToDB(),
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return core.UpdateError("large_file")
+	}
+	return nil
+}
+
 func fileRef(
 	m shared.MetaContext,
 	tx pgx.Tx,
 	pid proto.PartyID,
 	id proto.FileID,
 	v int,
+	lnk *linker,
 ) error {
-	// A new link to a file the GC has collected must fail: its chunks are
-	// gone. The UPDATE takes the row lock, so it serializes with the GC.
+	if v > 0 {
+		if lnk == nil {
+			return core.InternalError("fileRef: a new link needs its linker")
+		}
+		return fileLink(m, tx, pid, id, *lnk)
+	}
 	// Dropping a link to a dead file is fine (a dirent can point at an
-	// abandoned upload that was collected).
+	// abandoned upload that was collected). The UPDATE takes the row lock,
+	// so it serializes with the GC.
 	tag, err := tx.Exec(
 		m.Ctx(),
 		`UPDATE large_file SET refcount=refcount+$1, mtime=NOW()
-		WHERE short_host_id=$2 AND short_party_id=$3 AND file_id=$4
-		  AND ($1 < 0 OR status <> 'dead')`,
+		WHERE short_host_id=$2 AND short_party_id=$3 AND file_id=$4`,
 		v, int(m.HostID().Short), pid.Shorten().ExportToDB(), id.ExportToDB(),
 	)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 1 {
-		return nil
+	if tag.RowsAffected() != 1 {
+		return core.UpdateError("large_file")
 	}
-	if v > 0 {
-		var status string
-		err = tx.QueryRow(
-			m.Ctx(),
-			`SELECT status FROM large_file
-			WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3`,
-			int(m.HostID().Short), pid.Shorten().ExportToDB(), id.ExportToDB(),
-		).Scan(&status)
-		if err == nil && status == LargeFileStatusDead.ExportToDB() {
-			return core.KVNoentError{}
-		}
-	}
-	return core.UpdateError("large_file")
+	return nil
 }
 
+// smallFileRef adds or drops a link to a small file or symlink. A new link
+// to one that was linked and no longer is (refcount 0, no active dirent)
+// is refused, as for a large file (fileLink): it was deleted. Its first
+// link is told apart by mtime still being ctime (the row is written in one
+// transaction and only links and unlinks move mtime). Small files have no
+// recorded writer.
 func smallFileRef(
 	m shared.MetaContext,
 	tx pgx.Tx,
@@ -62,6 +166,29 @@ func smallFileRef(
 	id proto.KVNodeID,
 	v int,
 ) error {
+	if v > 0 {
+		var refcount int
+		var fresh bool
+		err := tx.QueryRow(
+			m.Ctx(),
+			`SELECT refcount, ctime = mtime FROM small_file_or_symlink
+			WHERE short_host_id=$1 AND short_party_id=$2 AND node_id=$3
+			FOR UPDATE`,
+			int(m.HostID().Short), pid.Shorten().ExportToDB(), id.ExportToDB(),
+		).Scan(&refcount, &fresh)
+		if err == pgx.ErrNoRows {
+			return core.UpdateError("small_file")
+		}
+		if err != nil {
+			return err
+		}
+		if refcount <= 0 && !fresh {
+			err = assertLinked(m, tx, pid, id, refcount)
+			if err != nil {
+				return err
+			}
+		}
+	}
 	tag, err := tx.Exec(
 		m.Ctx(),
 		`UPDATE small_file_or_symlink SET refcount=refcount+$1, mtime=NOW()

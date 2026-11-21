@@ -28,12 +28,16 @@ type direntUpdater struct {
 	existing *proto.KVDirent
 }
 
+// direntRef adds (v=1) or drops (v=-1) a link to a node. lnk says who adds
+// a link (nil when dropping one); a new link to an existing file is checked
+// (fileRef, smallFileRef).
 func direntRef(
 	m shared.MetaContext,
 	tx pgx.Tx,
 	pid proto.PartyID,
 	val proto.KVNodeID,
 	v int,
+	lnk *linker,
 ) error {
 	typ, err := val.Type()
 	if err != nil {
@@ -51,7 +55,7 @@ func direntRef(
 		if err != nil {
 			return err
 		}
-		return fileRef(m, tx, pid, *fileID, v)
+		return fileRef(m, tx, pid, *fileID, v, lnk)
 	case proto.KVNodeType_SmallFile, proto.KVNodeType_Symlink:
 		return smallFileRef(m, tx, pid, val, v)
 	case proto.KVNodeType_None:
@@ -67,8 +71,9 @@ func direntIncref(
 	tx pgx.Tx,
 	pid proto.PartyID,
 	val proto.KVNodeID,
+	lnk linker,
 ) error {
-	return direntRef(m, tx, pid, val, 1)
+	return direntRef(m, tx, pid, val, 1, &lnk)
 }
 
 func direntDecref(
@@ -77,7 +82,7 @@ func direntDecref(
 	pid proto.PartyID,
 	val proto.KVNodeID,
 ) error {
-	return direntRef(m, tx, pid, val, -1)
+	return direntRef(m, tx, pid, val, -1, nil)
 }
 
 func loadDirentByID(
@@ -194,7 +199,21 @@ func loadDirent(
 	return &ret, nil
 }
 
-func putDirent(m shared.MetaContext, tx pgx.Tx, pid proto.PartyID, role proto.Role, arg rem.KvPutArg) error {
+// putDirent writes a KvPut's dirents. Every new link is added first, then
+// each dirent drops the link of what it replaces. A move is [tombstone the
+// source, link the destination]: in that order a file would have no link
+// for a moment, and a link to a file with no link is refused (fileRef: that
+// is a deleted file, and linking it again would undo the delete).
+func putDirent(m shared.MetaContext, tx pgx.Tx, pid proto.PartyID, role proto.Role, lnk linker, arg rem.KvPutArg) error {
+	for _, de := range arg.Dirents {
+		if de.Value.IsTombstone() {
+			continue
+		}
+		err := direntIncref(m, tx, pid, de.Value, lnk)
+		if err != nil {
+			return err
+		}
+	}
 	for _, de := range arg.Dirents {
 		kp := direntUpdater{tx: tx, arg: arg, role: role, pid: pid, de: de}
 		err := kp.run(m)
@@ -327,14 +346,9 @@ func (p *direntUpdater) insertNewDirent(m shared.MetaContext) error {
 	return nil
 }
 
+// updateRefcounts drops the link of the value this dirent replaces. The new
+// value's link was added already (putDirent).
 func (p *direntUpdater) updateRefcounts(m shared.MetaContext) error {
-	// Only the case of a new put do we need to incref the new value
-	if !p.de.Value.IsTombstone() {
-		err := direntIncref(m, p.tx, p.pid, p.de.Value)
-		if err != nil {
-			return err
-		}
-	}
 	if p.existing != nil {
 		err := direntDecref(m, p.tx, p.pid, p.existing.Value)
 		if err != nil {
