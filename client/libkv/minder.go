@@ -127,6 +127,10 @@ type Minder struct {
 
 	localCliMu sync.Mutex
 	localCli   *rem.KVStoreClient
+
+	// noLinks: no walk follows a symlink (SetNoLinks, nolinks.go). Set once,
+	// before use.
+	noLinks bool
 }
 
 func NewMinder(au *libclient.UserContext) *Minder {

@@ -314,6 +314,10 @@ func (k *Minder) walkOne(
 				tmp := found.Value
 				return &walkOneRes{leaf: &tmp, de: found, lde: lde}, nil
 			}
+			// Everything from here on follows the link.
+			if k.noLinks {
+				return nil, LinkInPathError{Path: currentPath()}
+			}
 
 			slp, err := k.loadSymlink(m, kvp, found.Value)
 			if err != nil {
