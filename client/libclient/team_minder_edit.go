@@ -55,6 +55,10 @@ type TeamEditor struct {
 	changes []proto.MemberRole
 	rtps    []RemoteTokenPackage
 	cmd     []proto.ChangeMetadata
+	// rotate: the roles a key rotation (a TeamRotateKeys link, with no
+	// changes; lib/team/leave.go) makes new keys for. cmd must carry the
+	// matching metadata.
+	rotate []core.RoleKey
 
 	// testOpts bundles test-only overrides; production code leaves it nil.
 	testOpts *teamEditorTestOpts
@@ -266,7 +270,7 @@ func (t *TeamEditor) runGameplan(m MetaContext) error {
 		t.cp.FQParty().Host,
 		mrq,
 		vk.GetEntityID(),
-		&team.GameplanOpts{RequireOwner: true},
+		&team.GameplanOpts{RequireOwner: true, Rotate: t.rotate},
 	)
 	if err != nil {
 		return err

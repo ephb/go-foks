@@ -147,5 +147,17 @@ struct TeamChainState {
     // write that verified the chain, not the read. Zero on rows written
     // before this field existed.
     verifiedAt @15 : lib.Time;
+    // Roles whose current key a member who has since left could read: a
+    // TeamLeave link makes no new keys, a later TeamRotateKeys does.
+    // Empty when nothing is due, and on rows written before this field.
+    rotationDue @16 : List(TeamRotationDue);
+}
+
+// A role whose key is due for rotation, and the first leave since its
+// current generation that made it so.
+struct TeamRotationDue {
+    role @0 : lib.Role;
+    seqno @1 : lib.Seqno;
+    time @2 : lib.Time;
 }
 

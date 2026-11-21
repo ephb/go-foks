@@ -193,6 +193,11 @@ type Roster struct {
 	*RosterCore
 	KeyGens KeyGens
 	Mks     *MemberKeysSet
+
+	// RotationDue: roles whose current key a member who left could read
+	// (leave.go). Only a replaying client tracks it; the server does not
+	// need it, and nothing in the chain rules depends on it.
+	RotationDue RotationDue
 }
 
 func NewRoster(r *RosterCore, kg KeyGens, a *MemberKeysSet) *Roster {
@@ -217,10 +222,22 @@ func (r *Roster) Clone() *Roster {
 	r.Lock()
 	defer r.Unlock()
 	return &Roster{
-		RosterCore: r.RosterCore.Clone(),
-		KeyGens:    r.KeyGens.Clone(),
-		Mks:        r.Mks.Clone(),
+		RosterCore:  r.RosterCore.Clone(),
+		KeyGens:     r.KeyGens.Clone(),
+		Mks:         r.Mks.Clone(),
+		RotationDue: r.RotationDue.Clone(),
 	}
+}
+
+// RotationDueCopy is a copy of RotationDue, safe to read while the roster
+// moves on.
+func (r *Roster) RotationDueCopy() RotationDue {
+	if r == nil {
+		return nil
+	}
+	r.Lock()
+	defer r.Unlock()
+	return r.RotationDue.Clone()
 }
 
 func (r *Roster) Load(
@@ -244,6 +261,16 @@ type GameplanOpts struct {
 	// links; left unset when replaying existing chains, which must load even
 	// if they contain a link that stranded the team (issue #309).
 	RequireOwner bool
+
+	// Leave: the change set is a TeamLeave link (leave.go). The doer
+	// removes itself and nothing else, may hold any role, and makes no
+	// new keys; the roles it could read become due for rotation. The last
+	// owner can't leave, whatever RequireOwner says.
+	Leave bool
+
+	// Rotate: the change set is a TeamRotateKeys link (leave.go) for these
+	// roles. No member changes; each role gets a new key generation.
+	Rotate []core.RoleKey
 }
 
 func (r *Roster) Gameplan(
@@ -311,15 +338,28 @@ func (r *Roster) GameplanWithChanges(
 		return nil, nil, err
 	}
 
+	// The leaver's role before the link, for RotationDue.
+	var leaver *MemberInfo
+	var leave *Change
+	if opts != nil && opts.Leave && r.RosterCore != nil && len(changes) == 1 {
+		r.RosterCore.Lock()
+		if mi, ok := r.RosterCore.members[membID]; ok {
+			leaver = &mi
+			leave = &changes[0]
+		}
+		r.RosterCore.Unlock()
+	}
+
 	rPost, sched, keysPost, err := changes.Gameplan(membID, r.RosterCore, r.KeyGens, opts)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return &Roster{
-		RosterCore: rPost,
-		Mks:        r.Mks.CloneAndOverwriteWith(mks),
-		KeyGens:    keysPost,
+		RosterCore:  rPost,
+		Mks:         r.Mks.CloneAndOverwriteWith(mks),
+		KeyGens:     keysPost,
+		RotationDue: nextRotationDue(r.RotationDue, r.KeyGens, leaver, leave, sched),
 	}, sched, nil
 }
 

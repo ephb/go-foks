@@ -396,6 +396,13 @@ func (t *TeamWrapper) AllFQStrings() ([]proto.FQTeamString, error) {
 // offline load serves a snapshot without advancing it, so the gap between this
 // and now is how stale the caller's view actually is. Zero means the snapshot
 // predates the field.
+// RotationDue lists the roles whose current key a member who has left
+// could read, with the first such leave (lib/team/leave.go). Empty when
+// no key rotation is due.
+func (l *TeamWrapper) RotationDue() (team.RotationDue, error) {
+	return importRotationDue(l.prot.RotationDue)
+}
+
 func (l *TeamWrapper) VerifiedAt() proto.Time {
 	return l.prot.VerifiedAt
 }
@@ -1014,7 +1021,45 @@ func (l *TeamLoader) readRoster(m MetaContext, st *lcl.TeamChainState, kg team.K
 	if err != nil {
 		return nil, err
 	}
+	ret.RotationDue, err = importRotationDue(st.RotationDue)
+	if err != nil {
+		return nil, err
+	}
 	return ret, nil
+}
+
+// importRotationDue and exportRotationDue convert team.RotationDue (the
+// roles a member who left could read, lib/team/leave.go) to and from the
+// stored TeamChainState.
+func importRotationDue(v []lcl.TeamRotationDue) (team.RotationDue, error) {
+	ret := make(team.RotationDue, len(v))
+	for _, d := range v {
+		rk, err := core.ImportRole(d.Role)
+		if err != nil {
+			return nil, err
+		}
+		ret[*rk] = team.RotationDueInfo{Seqno: d.Seqno, Time: d.Time}
+	}
+	return ret, nil
+}
+
+func exportRotationDue(r team.RotationDue) []lcl.TeamRotationDue {
+	if len(r) == 0 {
+		return nil
+	}
+	ret := make([]lcl.TeamRotationDue, 0, len(r))
+	for rk, d := range r {
+		ret = append(ret, lcl.TeamRotationDue{Role: rk.Export(), Seqno: d.Seqno, Time: d.Time})
+	}
+	slices.SortFunc(ret, func(a, b lcl.TeamRotationDue) int {
+		ra, _ := core.ImportRole(a.Role)
+		rb, _ := core.ImportRole(b.Role)
+		if ra == nil || rb == nil {
+			return 0
+		}
+		return ra.Cmp(*rb)
+	})
+	return ret
 }
 
 func (l *TeamLoader) loadExistingTeam(m MetaContext) error {
@@ -2121,6 +2166,7 @@ func (l *TeamLoader) saveState(m MetaContext) error {
 		Ptks:              a,
 		PrivateKeys:       c,
 		Members:           l.rosterPost.Export(l.Arg.Team.Host),
+		RotationDue:       exportRotationDue(l.rosterPost.RotationDueCopy()),
 		RemovalKey:        l.RemovalKeyBox(),
 		RemoteViewTokens:  l.raw.RemoteViewTokens,
 		Hepks:             l.hepks.Export(),

@@ -190,6 +190,11 @@ enum ChangeType {
     Teamname @3;
     TeamIndexRange @4;
     MemberLoadFloor @5;
+    // A team member leaves of their own accord (lib/team.GameplanOpts.Leave).
+    TeamLeave @6;
+    // An admin or owner rotates the keys of some roles of a team
+    // (lib/team.GameplanOpts.Rotate), typically after a member left.
+    TeamRotateKeys @7;
 }
 
 enum DeviceType {
@@ -237,6 +242,16 @@ variant ChangeMetadata switch (t : ChangeType) {
     // this field is required in eldest team links. In the future,
     // but not now, we might allow this field to be updated.
     case MemberLoadFloor @3 : Role;
+
+    // A team link that removes its own signer and nothing else, and makes
+    // no new keys: a member leaving. The keys the leaver could read are
+    // rotated by a later TeamRotateKeys link of an admin or owner.
+    case TeamLeave : void;
+
+    // A team link with no member changes that makes a new generation of
+    // the keys of these roles. Signed by an admin or owner whose role is
+    // at least each of them.
+    case TeamRotateKeys @4 : List(Role);
 }
 
 variant LinkOuter switch (v : LinkVersion) @0xed4cc0f7081732b6 {

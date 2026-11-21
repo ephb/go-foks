@@ -612,6 +612,34 @@ func (c *teamEditor) checkAgainstCurrentParty(m shared.MetaContext) error {
 	return core.PermissionError("poster must be logged in or authorized to act on behalf of the team")
 }
 
+// checkLeave: a leave (lib/team/leave.go) is posted by the member who
+// leaves, as themselves. The link's rules already say the signer removes
+// itself and nothing else; this says the connection is that signer, not
+// someone holding a bearer token for the team.
+func (c *teamEditor) checkLeave(m shared.MetaContext) error {
+	if !c.openres.Kind.IsLeave() {
+		return nil
+	}
+	if c.arg.Tok != nil {
+		return core.PermissionError("a leave is posted without a team token")
+	}
+	if !c.openres.Gc.Signer.KeyOwner.Party.EntityID().Eq(m.UID().EntityID()) {
+		return core.PermissionError("only the member who leaves can post a leave")
+	}
+	return nil
+}
+
+// revokeLeaverTokens: a leave makes no new keys, so the team bearer tokens
+// the leaver made while a member (an admin's, say) would stay good until an
+// admin rotates the keys. End them now; the removal already ends the view
+// tokens, which are tied to the member's roster row.
+func (c *teamEditor) revokeLeaverTokens(m shared.MetaContext) error {
+	if !c.openres.Kind.IsLeave() {
+		return nil
+	}
+	return shared.RevokeTeamBearerTokensOfHolder(m, c.tx, c.teamID, m.UID())
+}
+
 func (c *teamEditor) loadBearerToken(m shared.MetaContext) error {
 	if c.arg.Tok == nil {
 		return nil
@@ -685,6 +713,11 @@ func (c *teamEditor) runEditCommon(m shared.MetaContext) error {
 		return err
 	}
 
+	err = c.checkLeave(m)
+	if err != nil {
+		return err
+	}
+
 	// need to insert name before we can insert into teams to satisfy the
 	// foreign key constraints.
 	err = c.vtab.insertCreateTeam(m)
@@ -707,6 +740,11 @@ func (c *teamEditor) runEditCommon(m shared.MetaContext) error {
 	}
 
 	err = c.editMembers(m)
+	if err != nil {
+		return err
+	}
+
+	err = c.revokeLeaverTokens(m)
 	if err != nil {
 		return err
 	}

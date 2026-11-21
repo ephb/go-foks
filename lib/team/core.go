@@ -231,6 +231,7 @@ func (r *RosterCore) planChangesLocked(
 	keyGensPre KeyGens,
 	newRoster *RosterCore,
 	forceNewKeyGens []core.RoleKey,
+	opts *GameplanOpts,
 ) (
 	*KeySchedule,
 	KeyGens,
@@ -296,7 +297,11 @@ func (r *RosterCore) planChangesLocked(
 		// If someone from a role was downgraded, then we need to rotate the
 		// existing roles they can no longer see. Note that removal counts
 		// as a downgrade, since RoleType_NONE is less than all other roles.
-		if ok && (cmp > 0 || (cmp == 0 && existing.Gen < chng.Info.Gen)) {
+		//
+		// A leave makes no new keys: the leaver would know them. Its roles
+		// are due for a TeamRotateKeys link by an admin or owner (leave.go).
+		leave := opts != nil && opts.Leave
+		if ok && (cmp > 0 || (cmp == 0 && existing.Gen < chng.Info.Gen)) && !leave {
 			var floor *core.RoleKey
 			if existing.Gen == chng.Info.Gen {
 				floor = &chng.Info.Role
@@ -325,6 +330,20 @@ func (r *RosterCore) planChangesLocked(
 		// Also keep track of deleted members, so admin knows to update their removals.
 		if rm {
 			ws.delMembs[chng.Member] = true
+		}
+	}
+
+	// A TeamRotateKeys link makes a new generation of each role it names,
+	// for every member who can read that role, as a removal does.
+	if opts != nil {
+		for _, role := range opts.Rotate {
+			ws.incrs[role] = true
+			ws.includes[role] = true
+			for m, i := range newRoster.members {
+				if role.LessThanOrEqual(i.Role) {
+					ws.rekeys[roleMemberIdx{r: role, m: m}] = true
+				}
+			}
 		}
 	}
 
@@ -544,8 +563,24 @@ func (d ChangeSet) Gameplan(
 		rPre = NewRosterCore()
 	}
 
+	leave := opts != nil && opts.Leave
+	rotate := opts != nil && len(opts.Rotate) > 0
+	if create && (leave || rotate) {
+		return nil, nil, nil, core.TeamRosterError("a new team can't leave or rotate keys")
+	}
+	if leave && rotate {
+		return nil, nil, nil, core.TeamRosterError("a link can't both leave and rotate keys")
+	}
+
 	if opts == nil || !opts.TestingNoCheck {
-		err = rPre.checkChangesLocked(doer, d, create)
+		if leave {
+			err = rPre.checkLeaveLocked(doer, d)
+		} else {
+			err = rPre.checkChangesLocked(doer, d, create)
+		}
+		if err == nil && rotate {
+			err = rPre.checkRotateLocked(doer, d, keysPre, opts.Rotate)
+		}
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -563,7 +598,13 @@ func (d ChangeSet) Gameplan(
 		return nil, nil, nil, core.TeamRosterError("change would leave team without an owner")
 	}
 
-	sched, keysPost = rPre.planChangesLocked(d, keysPre, rPost, forcedNewKeyGens)
+	// A leave is new, so there are no old chains to stay lenient for: the
+	// last owner can't leave, in every copy of the rules.
+	if leave && rPre.hasOwnerLocked() && !rPost.hasOwnerLocked() {
+		return nil, nil, nil, core.TeamRosterError(LastOwnerLeaveMsg)
+	}
+
+	sched, keysPost = rPre.planChangesLocked(d, keysPre, rPost, forcedNewKeyGens, opts)
 	return rPost, sched, keysPost, nil
 }
 

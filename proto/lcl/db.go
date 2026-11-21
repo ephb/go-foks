@@ -1145,6 +1145,7 @@ type TeamChainState struct {
 	HistoricalSenders []lib.SenderPair
 	MemberLoadFloor   *lib.Role
 	VerifiedAt        lib.Time
+	RotationDue       []TeamRotationDue
 }
 type TeamChainStateInternal__ struct {
 	_struct           struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -1164,6 +1165,7 @@ type TeamChainStateInternal__ struct {
 	HistoricalSenders *[](*lib.SenderPairInternal__)
 	MemberLoadFloor   *lib.RoleInternal__
 	VerifiedAt        *lib.TimeInternal__
+	RotationDue       *[](*TeamRotationDueInternal__)
 }
 
 func (t TeamChainStateInternal__) Import() TeamChainState {
@@ -1348,6 +1350,24 @@ func (t TeamChainStateInternal__) Import() TeamChainState {
 			}
 			return x.Import()
 		})(t.VerifiedAt),
+		RotationDue: (func(x *[](*TeamRotationDueInternal__)) (ret []TeamRotationDue) {
+			if x == nil || len(*x) == 0 {
+				return nil
+			}
+			ret = make([]TeamRotationDue, len(*x))
+			for k, v := range *x {
+				if v == nil {
+					continue
+				}
+				ret[k] = (func(x *TeamRotationDueInternal__) (ret TeamRotationDue) {
+					if x == nil {
+						return ret
+					}
+					return x.Import()
+				})(v)
+			}
+			return ret
+		})(t.RotationDue),
 	}
 }
 func (t TeamChainState) Export() *TeamChainStateInternal__ {
@@ -1432,6 +1452,16 @@ func (t TeamChainState) Export() *TeamChainStateInternal__ {
 			return (*x).Export()
 		})(t.MemberLoadFloor),
 		VerifiedAt: t.VerifiedAt.Export(),
+		RotationDue: (func(x []TeamRotationDue) *[](*TeamRotationDueInternal__) {
+			if len(x) == 0 {
+				return nil
+			}
+			ret := make([](*TeamRotationDueInternal__), len(x))
+			for k, v := range x {
+				ret[k] = v.Export()
+			}
+			return &ret
+		})(t.RotationDue),
 	}
 }
 func (t *TeamChainState) Encode(enc rpc.Encoder) error {
@@ -1449,6 +1479,63 @@ func (t *TeamChainState) Decode(dec rpc.Decoder) error {
 }
 
 func (t *TeamChainState) Bytes() []byte { return nil }
+
+type TeamRotationDue struct {
+	Role  lib.Role
+	Seqno lib.Seqno
+	Time  lib.Time
+}
+type TeamRotationDueInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Role    *lib.RoleInternal__
+	Seqno   *lib.SeqnoInternal__
+	Time    *lib.TimeInternal__
+}
+
+func (t TeamRotationDueInternal__) Import() TeamRotationDue {
+	return TeamRotationDue{
+		Role: (func(x *lib.RoleInternal__) (ret lib.Role) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(t.Role),
+		Seqno: (func(x *lib.SeqnoInternal__) (ret lib.Seqno) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(t.Seqno),
+		Time: (func(x *lib.TimeInternal__) (ret lib.Time) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(t.Time),
+	}
+}
+func (t TeamRotationDue) Export() *TeamRotationDueInternal__ {
+	return &TeamRotationDueInternal__{
+		Role:  t.Role.Export(),
+		Seqno: t.Seqno.Export(),
+		Time:  t.Time.Export(),
+	}
+}
+func (t *TeamRotationDue) Encode(enc rpc.Encoder) error {
+	return enc.Encode(t.Export())
+}
+
+func (t *TeamRotationDue) Decode(dec rpc.Decoder) error {
+	var tmp TeamRotationDueInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*t = tmp.Import()
+	return nil
+}
+
+func (t *TeamRotationDue) Bytes() []byte { return nil }
 
 func init() {
 	rpc.AddUnique(RoleAndGenusTypeUniqueID)

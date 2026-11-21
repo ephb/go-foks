@@ -21,6 +21,7 @@ type OpenTeamLinkRes struct {
 	Sched      KeySchedule
 	Tnc        *proto.Commitment
 	Range      *core.RationalRange
+	Kind       LinkKind // a leave or a key rotation (leave.go), or neither
 }
 
 type OpenEldestRes struct {
@@ -289,11 +290,28 @@ func OpenTeamLink(
 		}
 	}
 
-	// Given the current roster, the signer ID, and the changes, compute
-	// the new roster, the rekey schedule. Also check the changes for sanity.
-	rPost, sched, err := rPre.Gameplan(*gc.Signer.KeyOwner, hostID, mrq, gc.Signer.Key, nil)
+	// A leave or a key rotation (leave.go) is replayed under its own rules;
+	// every other link exactly as before.
+	kind, err := ReadLinkKind(gc)
 	if err != nil {
 		return nil, err
+	}
+
+	// Given the current roster, the signer ID, and the changes, compute
+	// the new roster, the rekey schedule. Also check the changes for sanity.
+	rPost, sched, err := rPre.Gameplan(*gc.Signer.KeyOwner, hostID, mrq, gc.Signer.Key, kind.opts())
+	if err != nil {
+		return nil, err
+	}
+
+	// The server checks every link's new keys against its schedule; for
+	// the two new kinds the replaying client does too, so a leave can't
+	// slip a key of the leaver's making into the team's key ring.
+	if kind.IsLeave() || kind.IsRotate() {
+		err = sched.MatchPublicKeys(gc.SharedKeys)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var tnc *proto.Commitment
@@ -328,6 +346,7 @@ func OpenTeamLink(
 		Sched:      *sched,
 		Tnc:        tnc,
 		Range:      rng,
+		Kind:       *kind,
 	}
 
 	return &ret, nil
