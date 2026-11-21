@@ -469,6 +469,13 @@ channels got updated since the user last refreshed inbox.
 We can also dangle server-synced preferences here, like whether a channel is hidden
 or muted for a user.
 
+`rtSetChannelFlags(chid, muted?, hidden?)` sets them: the caller's own row
+only, authorized like a read of the channel. A change bumps the caller's
+inbox version and stamps the row at it, as a read mark does, so the user's
+other devices pick the flags up with their next `rtGetChangedThreads`; a
+call that changes nothing bumps nothing. The server gives the flags no
+meaning of its own.
+
 #### user_inbox
 
 Whenever the user receives any new message, we bump the inboxVersion, and then bump

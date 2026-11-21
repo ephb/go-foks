@@ -353,4 +353,18 @@ protocol RealTime
         typing @1 : Bool
     );
 
+    // Set the caller's own preferences for a channel: muted and/or hidden,
+    // the flags rtGetChangedThreads returns in RTInboxChannel. An absent
+    // flag is left as it is; a call that names neither is rejected. Only
+    // the caller's own row is touched, and the caller must be able to read
+    // the channel (as for rtReadThrough). A change bumps the caller's inbox
+    // version, so their other devices pick it up on their next sync; a call
+    // that changes nothing bumps nothing. The server only stores the flags:
+    // what "muted" silences is the client's business.
+    rtSetChannelFlags @19 (
+        chid @0 : lib.RTChannelID,
+        muted @1 : Option(Bool),
+        hidden @2 : Option(Bool)
+    );
+
 }

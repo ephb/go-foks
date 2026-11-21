@@ -2475,6 +2475,75 @@ func (r *RtSetTypingArg) Decode(dec rpc.Decoder) error {
 
 func (r *RtSetTypingArg) Bytes() []byte { return nil }
 
+type RtSetChannelFlagsArg struct {
+	Chid   lib.RTChannelID
+	Muted  *bool
+	Hidden *bool
+}
+type RtSetChannelFlagsArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Chid    *lib.RTChannelIDInternal__
+	Muted   *bool
+	Hidden  *bool
+}
+
+func (r RtSetChannelFlagsArgInternal__) Import() RtSetChannelFlagsArg {
+	return RtSetChannelFlagsArg{
+		Chid: (func(x *lib.RTChannelIDInternal__) (ret lib.RTChannelID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.Chid),
+		Muted: (func(x *bool) *bool {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *bool) (ret bool) {
+				if x == nil {
+					return ret
+				}
+				return *x
+			})(x)
+			return &tmp
+		})(r.Muted),
+		Hidden: (func(x *bool) *bool {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *bool) (ret bool) {
+				if x == nil {
+					return ret
+				}
+				return *x
+			})(x)
+			return &tmp
+		})(r.Hidden),
+	}
+}
+func (r RtSetChannelFlagsArg) Export() *RtSetChannelFlagsArgInternal__ {
+	return &RtSetChannelFlagsArgInternal__{
+		Chid:   r.Chid.Export(),
+		Muted:  r.Muted,
+		Hidden: r.Hidden,
+	}
+}
+func (r *RtSetChannelFlagsArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RtSetChannelFlagsArg) Decode(dec rpc.Decoder) error {
+	var tmp RtSetChannelFlagsArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *RtSetChannelFlagsArg) Bytes() []byte { return nil }
+
 type RealTimeInterface interface {
 	RtNewChannel(context.Context, RtNewChannelArg) error
 	RtGetChannel(context.Context, lib.RTChannelID) (RTChannelMetadata, error)
@@ -2495,6 +2564,7 @@ type RealTimeInterface interface {
 	RtUpdateChannel(context.Context, RtUpdateChannelArg) error
 	RtSetChannelArchived(context.Context, RtSetChannelArchivedArg) error
 	RtSetTyping(context.Context, RtSetTypingArg) error
+	RtSetChannelFlags(context.Context, RtSetChannelFlagsArg) error
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h lib.Header) error
 	MakeResHeader() lib.Header
@@ -2941,6 +3011,26 @@ func (c RealTimeClient) RtSetTyping(ctx context.Context, arg RtSetTypingArg) (er
 	}
 	var tmp rpc.DataWrap[lib.Header, interface{}]
 	err = c.Cli.Call2(ctx, rpc.NewMethodV2(RealTimeProtocolID, 18, "RealTime.rtSetTyping"), warg, &tmp, 0*time.Millisecond, realTimeErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	return
+}
+func (c RealTimeClient) RtSetChannelFlags(ctx context.Context, arg RtSetChannelFlagsArg) (err error) {
+	warg := &rpc.DataWrap[lib.Header, *RtSetChannelFlagsArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[lib.Header, interface{}]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(RealTimeProtocolID, 19, "RealTime.rtSetChannelFlags"), warg, &tmp, 0*time.Millisecond, realTimeErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
 	if err != nil {
 		return
 	}
@@ -3496,6 +3586,34 @@ func RealTimeProtocol(i RealTimeInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "rtSetTyping",
+			},
+			19: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[lib.Header, *RtSetChannelFlagsArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[lib.Header, *RtSetChannelFlagsArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[lib.Header, *RtSetChannelFlagsArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						err := i.RtSetChannelFlags(ctx, (typedArg.Import()))
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[lib.Header, interface{}]{
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "rtSetChannelFlags",
 			},
 		},
 		WrapError: RealTimeMakeGenericErrorWrapper(i.ErrorWrapper()),

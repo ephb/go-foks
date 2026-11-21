@@ -718,9 +718,16 @@ func (r *readThroughMarker) run(m shared.MetaContext) error {
 	// The pointer moved: bump the caller's global inbox version and stamp this
 	// row at it, "like a send would do" (chat-server-design.md), so the
 	// caller's other devices pick the read state up on their next sync.
+	return r.stampInbox(m)
+}
+
+// stampInbox bumps the caller's global inbox version and stamps their row for
+// this channel at it, so their other devices see the row as changed on their
+// next sync. It sets bumped.
+func (r *readThroughMarker) stampInbox(m shared.MetaContext) error {
 	r.bumped = true
 	var vers int64
-	err = r.tx.QueryRow(
+	err := r.tx.QueryRow(
 		m.Ctx(),
 		`INSERT INTO user_inbox (short_host_id, uid, app_id, inbox_version, mtime)
 		 VALUES ($1, $2, $3, 1, NOW())

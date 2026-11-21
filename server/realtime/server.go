@@ -163,6 +163,10 @@ func (c *ClientConn) RtSetChannelArchived(ctx context.Context, arg rem.RtSetChan
 	return SetChannelArchived(m, arg)
 }
 
+func (c *ClientConn) RtSetChannelFlags(ctx context.Context, arg rem.RtSetChannelFlagsArg) error {
+	m := shared.NewMetaContextConn(ctx, c)
+	return SetChannelFlags(m, arg)
+}
 func (c *ClientConn) RtSetTyping(ctx context.Context, arg rem.RtSetTypingArg) error {
 	m := shared.NewMetaContextConn(ctx, c)
 	return SetTyping(m, arg)
