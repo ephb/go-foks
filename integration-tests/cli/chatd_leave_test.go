@@ -185,6 +185,21 @@ func TestChatdTeamLeave(t *testing.T) {
 	f = r.bob.call("get_thread_view", map[string]any{"team": team, "app": 1, "channel": defaultChannel(), "before": 0, "num": 50})
 	require.False(t, f.OK)
 
+	// bob is added again, and leaves again: one left line per leave.
+	joinAs(t, alice, r.bob, team)
+	require.True(t, memberOf(r.bob, teamNm))
+	r.bob.ok("team_leave", map[string]any{"team": team}, nil)
+	merklePoke(t)
+	require.False(t, memberOf(r.bob, teamNm))
+	var nLeft int
+	for _, m := range threadMsgs(carol, team, defaultChannel()) {
+		if m.Body == `{"kbf":1,"sys":{"type":"left"}}` && m.SenderName != nil && strings.EqualFold(*m.SenderName, r.bobNm) {
+			nLeft++
+		}
+	}
+	require.Equal(t, 2, nLeft, "bob's left lines")
+	waitKeysRotated(t, carol, teamNm, 60*time.Second)
+
 	// alice is the last owner.
 	f = alice.call("team_leave", map[string]any{"team": team})
 	require.Equal(t, "rejected", f.Error.Code, "%+v", f.Error)
