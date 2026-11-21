@@ -1840,6 +1840,104 @@ func (k *KVSelectVhost) Decode(dec rpc.Decoder) error {
 
 func (k *KVSelectVhost) Bytes() []byte { return nil }
 
+type KVFileInfo struct {
+	Writer *lib.FQParty
+}
+type KVFileInfoInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Writer  *lib.FQPartyInternal__
+}
+
+func (k KVFileInfoInternal__) Import() KVFileInfo {
+	return KVFileInfo{
+		Writer: (func(x *lib.FQPartyInternal__) *lib.FQParty {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *lib.FQPartyInternal__) (ret lib.FQParty) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(k.Writer),
+	}
+}
+func (k KVFileInfo) Export() *KVFileInfoInternal__ {
+	return &KVFileInfoInternal__{
+		Writer: (func(x *lib.FQParty) *lib.FQPartyInternal__ {
+			if x == nil {
+				return nil
+			}
+			return (*x).Export()
+		})(k.Writer),
+	}
+}
+func (k *KVFileInfo) Encode(enc rpc.Encoder) error {
+	return enc.Encode(k.Export())
+}
+
+func (k *KVFileInfo) Decode(dec rpc.Decoder) error {
+	var tmp KVFileInfoInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*k = tmp.Import()
+	return nil
+}
+
+func (k *KVFileInfo) Bytes() []byte { return nil }
+
+type KvFileInfoArg struct {
+	Auth KVAuth
+	Id   lib.FileID
+}
+type KvFileInfoArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Auth    *KVAuthInternal__
+	Id      *lib.FileIDInternal__
+}
+
+func (k KvFileInfoArgInternal__) Import() KvFileInfoArg {
+	return KvFileInfoArg{
+		Auth: (func(x *KVAuthInternal__) (ret KVAuth) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Auth),
+		Id: (func(x *lib.FileIDInternal__) (ret lib.FileID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Id),
+	}
+}
+func (k KvFileInfoArg) Export() *KvFileInfoArgInternal__ {
+	return &KvFileInfoArgInternal__{
+		Auth: k.Auth.Export(),
+		Id:   k.Id.Export(),
+	}
+}
+func (k *KvFileInfoArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(k.Export())
+}
+
+func (k *KvFileInfoArg) Decode(dec rpc.Decoder) error {
+	var tmp KvFileInfoArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*k = tmp.Import()
+	return nil
+}
+
+func (k *KvFileInfoArg) Bytes() []byte { return nil }
+
 type KVStoreInterface interface {
 	KvMkdir(context.Context, KvMkdirArg) (KVMkdirRes, error)
 	KvPut(context.Context, KvPutArg) error
@@ -1858,6 +1956,7 @@ type KVStoreInterface interface {
 	KvLockRelease(context.Context, KvLockReleaseArg) error
 	KvUsage(context.Context, KVAuth) (lib.KVUsage, error)
 	SelectVHost(context.Context, lib.HostID) error
+	KvFileInfo(context.Context, KvFileInfoArg) (KVFileInfo, error)
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h lib.Header) error
 	MakeResHeader() lib.Header
@@ -2262,6 +2361,27 @@ func (c KVStoreClient) SelectVHost(ctx context.Context, host lib.HostID) (err er
 			return
 		}
 	}
+	return
+}
+func (c KVStoreClient) KvFileInfo(ctx context.Context, arg KvFileInfoArg) (res KVFileInfo, err error) {
+	warg := &rpc.DataWrap[lib.Header, *KvFileInfoArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[lib.Header, KVFileInfoInternal__]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(KVStoreProtocolID, 19, "KVStore.kvFileInfo"), warg, &tmp, 0*time.Millisecond, kVStoreErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	res = tmp.Data.Import()
 	return
 }
 func KVStoreProtocol(i KVStoreInterface) rpc.ProtocolV2 {
@@ -2753,6 +2873,35 @@ func KVStoreProtocol(i KVStoreInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "selectVHost",
+			},
+			19: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[lib.Header, *KvFileInfoArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[lib.Header, *KvFileInfoArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[lib.Header, *KvFileInfoArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						tmp, err := i.KvFileInfo(ctx, (typedArg.Import()))
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[lib.Header, *KVFileInfoInternal__]{
+							Data:   tmp.Export(),
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "kvFileInfo",
 			},
 		},
 		WrapError: KVStoreMakeGenericErrorWrapper(i.ErrorWrapper()),

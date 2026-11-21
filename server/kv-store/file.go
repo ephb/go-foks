@@ -255,6 +255,9 @@ type fileUploader struct {
 	fid  proto.FileID
 	chnk proto.UploadChunk
 	md   proto.LargeFileMetadata
+	// writer is who uploads the file (authActor), recorded in
+	// large_file.writer; nil on a shard without patch p2.
+	writer *proto.FQParty
 }
 
 // lockFile loads the file's status and locks its row for the rest of the
@@ -406,9 +409,10 @@ func fileUploadInit(
 	tx pgx.Tx,
 	pid proto.PartyID,
 	role proto.Role,
+	writer *proto.FQParty,
 	arg rem.KvFileUploadInitArg,
 ) error {
-	ful := fileUploader{tx: tx, pid: pid, role: role, fid: arg.FileID, md: arg.Md, chnk: arg.Chunk, lfe: lfe}
+	ful := fileUploader{tx: tx, pid: pid, role: role, fid: arg.FileID, md: arg.Md, chnk: arg.Chunk, lfe: lfe, writer: writer}
 	return ful.run(m)
 }
 
@@ -433,19 +437,36 @@ func (f *fileUploader) checkPerms(m shared.MetaContext) error {
 }
 
 func (f *fileUploader) insLargeFile(m shared.MetaContext) error {
-	tag, err := f.tx.Exec(
-		m.Ctx(),
-		`INSERT INTO large_file(
-			short_host_id, short_party_id, file_id, size, 
+	// The writer (who uploads) is recorded on a shard with patch p2
+	// (writer.go).
+	var writer []byte
+	if f.writer != nil {
+		var err error
+		writer, err = encodeWriter(*f.writer)
+		if err != nil {
+			return err
+		}
+	}
+	q := `INSERT INTO large_file(
+			short_host_id, short_party_id, file_id, size,
 			ctime, mtime, refcount, status, storage_type
-		) VALUES($1, $2, $3, $4, NOW(), NOW(), 0, $5, $6)`,
+		) VALUES($1, $2, $3, $4, NOW(), NOW(), 0, $5, $6)`
+	args := []any{
 		int(m.HostID().Short),
 		f.pid.Shorten().ExportToDB(),
 		f.fid.ExportToDB(),
 		0, // will update later
 		LargeFileStatusUploading.ExportToDB(),
 		f.lfe.Strategy().ExportToDB(),
-	)
+	}
+	if writer != nil {
+		q = `INSERT INTO large_file(
+			short_host_id, short_party_id, file_id, size,
+			ctime, mtime, refcount, status, storage_type, writer
+		) VALUES($1, $2, $3, $4, NOW(), NOW(), 0, $5, $6, $7)`
+		args = append(args, writer)
+	}
+	tag, err := f.tx.Exec(m.Ctx(), q, args...)
 	if err != nil {
 		return err
 	}

@@ -1531,8 +1531,66 @@ func (k *Minder) Unlink(
 		return err
 	}
 	return k.retryCacheLoop(m, kvp, func(m MetaContext) error {
-		return k.unlinkInner(m, cfg, kvp, rp, pap)
+		return k.unlinkInner(m, cfg, kvp, rp, pap, nil)
 	})
+}
+
+// UnlinkNode is Unlink of a name only while it links the node want. A name
+// that links something else, or nothing, is left alone and answers
+// KVNoentError. The check and the unlink are one write of the name's next
+// version, so a name that changes in between makes the write fail and the
+// check run again (retryCacheLoop). For an application that is told by
+// someone else which file to delete, and must not delete whatever else has
+// taken its name.
+func (k *Minder) UnlinkNode(
+	m MetaContext,
+	cfg lcl.KVConfig,
+	path proto.KVPath,
+	want proto.KVNodeID,
+) error {
+	kvp, rp, err := k.initReqWrite(m, cfg)
+	if err != nil {
+		return err
+	}
+	pap, err := kv.ParseAbsPath(path)
+	if err != nil {
+		return err
+	}
+	return k.retryCacheLoop(m, kvp, func(m MetaContext) error {
+		return k.unlinkInner(m, cfg, kvp, rp, pap, &want)
+	})
+}
+
+// FileInfo asks the server what it knows about large file fid (rem
+// kvFileInfo): who uploaded it, when the server recorded that. Never from a
+// cache. A file that no name links any more, or that the GC collected, is
+// KVNoentError, as a read of it is. A server from before kvFileInfo answers
+// rpc.MethodV2NotFoundError.
+func (k *Minder) FileInfo(
+	m MetaContext,
+	cfg lcl.KVConfig,
+	fid proto.FileID,
+) (
+	*rem.KVFileInfo,
+	error,
+) {
+	kvp, err := k.initReq(m, cfg)
+	if err != nil {
+		return nil, err
+	}
+	var ret rem.KVFileInfo
+	err = k.withFreshToken(m, kvp, func(m MetaContext) error {
+		auth, cli, err := k.client(m, kvp)
+		if err != nil {
+			return err
+		}
+		ret, err = cli.KvFileInfo(m.Ctx(), rem.KvFileInfoArg{Auth: *auth, Id: fid})
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &ret, nil
 }
 
 func (k *Minder) unlinkInner(
@@ -1541,6 +1599,7 @@ func (k *Minder) unlinkInner(
 	kvp *KVParty,
 	rp *proto.RolePair,
 	pap *kv.ParsedPath,
+	want *proto.KVNodeID,
 ) error {
 	wr, err := k.walkFromRoot(m, kvp, pap, walkOpts{unlink: true})
 	if err != nil {
@@ -1551,6 +1610,9 @@ func (k *Minder) unlinkInner(
 		return core.InternalError("expected lde.found")
 	}
 	if lde.found.Value.IsTombstone() {
+		return core.KVNoentError{Path: pap.Base().ToPath()}
+	}
+	if want != nil && lde.found.Value != *want {
 		return core.KVNoentError{Path: pap.Base().ToPath()}
 	}
 	if lde.found.Value.IsDir() && !cfg.Recursive {

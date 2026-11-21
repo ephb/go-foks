@@ -16,11 +16,13 @@ import (
 // TestKVStorePatchP1 upgrades a KV shard the way `foks-tool patch-db --db
 // kv-store` does. The test database is made from the base schema file, which
 // already holds the patch, so the test first puts every shard back to how a
-// server from before the patch looks: no GC indexes and no schema_patches
-// table (p1 is the first patch for the KV shards).
+// server from before the patch looks: no GC indexes, no large_file.writer
+// (p2) and no schema_patches table (p1 is the first patch for the KV shards).
+// The run then applies p1 and p2.
 func TestKVStorePatchP1(t *testing.T) {
 	tew := testEnvBeta(t)
 	m := tew.MetaContext()
+	defer kvStore.ForgetWriterColumns()
 
 	gcIndexes := func() int {
 		var tot int
@@ -68,6 +70,7 @@ func TestKVStorePatchP1(t *testing.T) {
 			`DROP INDEX large_file_gc_unlinked_idx`,
 			`DROP INDEX large_file_gc_uploading_idx`,
 			`DROP INDEX dirent_value_active_idx`,
+			`ALTER TABLE large_file DROP COLUMN writer`,
 			`DROP TABLE schema_patches`,
 		} {
 			_, err := db.Exec(m.Ctx(), q)
@@ -97,11 +100,11 @@ func TestKVStorePatchP1(t *testing.T) {
 
 	err = m.ForAllShards(func(db *pgxpool.Conn) error {
 		var n int
-		err := db.QueryRow(m.Ctx(), `SELECT COUNT(*) FROM schema_patches WHERE id = 1`).Scan(&n)
+		err := db.QueryRow(m.Ctx(), `SELECT COUNT(*) FROM schema_patches WHERE id IN (1, 2)`).Scan(&n)
 		if err != nil {
 			return err
 		}
-		if n != 1 {
+		if n != 2 {
 			return core.NotFoundError("schema_patches row")
 		}
 		return nil

@@ -106,6 +106,7 @@ CREATE TABLE large_file (
     storage_type storage_type NOT NULL,
     ctime TIMESTAMP NOT NULL,
     mtime TIMESTAMP NOT NULL,
+    writer BYTEA,
     PRIMARY KEY(short_host_id, short_party_id, file_id)
 );
 
@@ -206,3 +207,4 @@ CREATE TABLE schema_patches (
     ctime TIMESTAMP NOT NULL
 );
 INSERT INTO schema_patches (id, ctime) VALUES (1, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (2, NOW());

@@ -89,6 +89,10 @@ struct KVLock {
     lockID @1 : LockID;
 }
 
+struct KVFileInfo {
+    writer @0 : Option(lib.FQParty);
+}
+
 protocol KVStore 
     errors lib.Status 
     argHeader lib.Header 
@@ -182,4 +186,13 @@ protocol KVStore
     selectVHost @18 (
         host @0 : lib.HostID
     ) : KVSelectVhost;
+
+    // kvFileInfo is what the server knows about a large file that a name
+    // still links: who uploaded it (absent for a file uploaded before the
+    // server recorded it). An unlinked or collected file is KVNoentError,
+    // as a read of it is. Authorized like a read of the file.
+    kvFileInfo @19 (
+        auth @0 : KVAuth,
+        id @1 : lib.FileID
+    ) -> KVFileInfo;
 }

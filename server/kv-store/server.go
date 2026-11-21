@@ -143,6 +143,20 @@ func (c *ClientConn) auth(
 	auth rem.KVAuth,
 	f func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, r proto.Role) error,
 ) error {
+	return c.authActor(ctx, auth,
+		func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, r proto.Role, _ proto.FQParty) error {
+			return f(m, db, pid, r)
+		})
+}
+
+// authActor is auth that also says who acts: the user for a user's own
+// store, and for a team's the member the bearer token was minted for (a
+// user, or a team that is a member).
+func (c *ClientConn) authActor(
+	ctx context.Context,
+	auth rem.KVAuth,
+	f func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, r proto.Role, actor proto.FQParty) error,
+) error {
 	m := shared.NewMetaContextConn(ctx, c)
 	typ, err := auth.GetT()
 	if err != nil {
@@ -150,6 +164,7 @@ func (c *ClientConn) auth(
 	}
 	var pid proto.PartyID
 	var role proto.Role
+	var actor proto.FQParty
 	switch typ {
 	case rem.KVAuthType_User:
 		uid := m.UID()
@@ -158,6 +173,7 @@ func (c *ClientConn) auth(
 		}
 		pid = m.UID().ToPartyID()
 		role = m.Role()
+		actor = proto.FQParty{Party: pid, Host: m.HostID().Id}
 	case rem.KVAuthType_Team:
 		db, err := m.Db(shared.DbTypeUsers)
 		if err != nil {
@@ -182,6 +198,7 @@ func (c *ClientConn) auth(
 			return err
 		}
 		role = tmp.Role
+		actor = tmp.Req.Member
 		if !tmp.Req.Team.Host.Eq(m.HostID().Id) {
 			return core.HostMismatchError{Which: "team host in kv-store auth"}
 		}
@@ -202,7 +219,7 @@ func (c *ClientConn) auth(
 		return err
 	}
 	defer kvdb.Release()
-	err = f(m, kvdb, pid, role)
+	err = f(m, kvdb, pid, role, actor)
 	if err != nil {
 		return err
 	}
@@ -323,13 +340,40 @@ func (c *ClientConn) KvGet(ctx context.Context, arg rem.KvGetArg) (rem.KVGetRes,
 }
 
 func (c *ClientConn) KvFileUploadInit(ctx context.Context, arg rem.KvFileUploadInitArg) error {
-	return c.auth(ctx, arg.Auth,
-		func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, role proto.Role) error {
+	return c.authActor(ctx, arg.Auth,
+		func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, role proto.Role, actor proto.FQParty) error {
+			// Outside the transaction: a catalog read, cached.
+			withWriter, err := hasWriterColumn(m, db)
+			if err != nil {
+				return err
+			}
+			var writer *proto.FQParty
+			if withWriter {
+				writer = &actor
+			}
 			return shared.RetryTx(m, db, "kvFileUploadInit",
 				func(m shared.MetaContext, tx pgx.Tx) error {
-					return fileUploadInit(m, c.srv.lfe, tx, pid, role, arg)
+					return fileUploadInit(m, c.srv.lfe, tx, pid, role, writer, arg)
 				})
 		})
+}
+
+func (c *ClientConn) KvFileInfo(ctx context.Context, arg rem.KvFileInfoArg) (rem.KVFileInfo, error) {
+	var ret rem.KVFileInfo
+	err := c.auth(ctx, arg.Auth,
+		func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, role proto.Role) error {
+			withWriter, err := hasWriterColumn(m, db)
+			if err != nil {
+				return err
+			}
+			tmp, err := getFileInfo(m, db, pid, role, arg.Id, withWriter)
+			if err != nil {
+				return err
+			}
+			ret = *tmp
+			return nil
+		})
+	return ret, err
 }
 
 func (c *ClientConn) KvFileUploadChunk(ctx context.Context, arg rem.KvFileUploadChunkArg) error {
