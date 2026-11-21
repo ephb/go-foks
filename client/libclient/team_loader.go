@@ -149,6 +149,9 @@ type TeamLoader struct {
 	tncs            []proto.Commitment // team name commitments
 	tnseq           proto.NameSeqno
 	removalKey      *rem.TeamRemovalKey
+	// freshRemovalKey: the next run asks the server for the current
+	// removal key box even if one is kept (LoadTeamOpts.FreshRemovalKey).
+	freshRemovalKey bool
 	rosterDetails   map[proto.FQEntityFixed][](*rosterPackage)
 	canLoadMembers  bool
 	openView        bool
@@ -1160,10 +1163,15 @@ func (l *TeamLoader) loadTeamFromServer(m MetaContext) error {
 
 	// Ad-hoc teams have fixed membership and no removal keys, so don't ask the
 	// server for one (it would error with "removal key not found").
-	if l.Arg.Keys != nil && (l.existing == nil || l.existing.RemovalKey == nil) &&
+	// A kept box can be stale: a member who left (or was removed) and was
+	// added again has a new removal key, and the kept one's removal is
+	// already posted. A caller about to use the key (a leave) asks for the
+	// current one (freshRemovalKey, once).
+	if l.Arg.Keys != nil && (l.existing == nil || l.existing.RemovalKey == nil || l.freshRemovalKey) &&
 		!l.TeamID().Type().IsAdHocTeam() {
 		arg.LoadRemovalKey = true
 	}
+	l.freshRemovalKey = false
 
 	if l.existing != nil {
 		arg.HavePtkGens = l.ptks.HaveKeysFor()
@@ -2270,7 +2278,13 @@ func UnboxRemovalKey(
 	return &out.Key, nil
 }
 
+// RemovalKeyBox is the member's removal key box: the one the server sent
+// in this load if it was asked for one (the newest, of the current
+// membership), else the one kept from an earlier load.
 func (l *TeamLoader) RemovalKeyBox() *proto.TeamRemovalKeyBox {
+	if l.raw.RemovalKey != nil {
+		return l.raw.RemovalKey
+	}
 	if l.existing != nil && l.existing.RemovalKey != nil {
 		return l.existing.RemovalKey
 	}

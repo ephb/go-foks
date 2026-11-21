@@ -308,6 +308,45 @@ func TestTeamLeaveCarriesNothingElse(t *testing.T) {
 	require.NotContains(t, f.roster(t, f.alice), f.bob.u.uid)
 }
 
+// readd: alice invites p again and admits it as a plain member.
+func (f *leaveFixture) readd(t *testing.T, p leaveParty) {
+	inv, err := f.alice.tm.CreateInvite(f.alice.m, f.fqtp)
+	require.NoError(t, err)
+	f.tew.DirectDoubleMerklePokeInTest(t)
+	_, err = p.tm.AcceptInvite(p.m, lcl.TeamAcceptInviteArg{I: *inv})
+	require.NoError(t, err)
+	f.tew.DirectDoubleMerklePokeInTest(t)
+	inbox, err := f.alice.tm.TeamInbox(f.alice.m, f.fqtp)
+	require.NoError(t, err)
+	var toks []lcl.TokRole
+	for _, row := range inbox.Rows {
+		if row.Nfqp.Fqp.Party.EntityID().Eq(p.u.uid.EntityID()) {
+			toks = append(toks, lcl.TokRole{Tok: row.Tok, Role: proto.DefaultRole})
+		}
+	}
+	require.Len(t, toks, 1)
+	err = f.alice.tm.TeamAdmit(f.alice.m, lcl.TeamAdmitArg{Team: f.fqtp, Members: toks})
+	require.NoError(t, err)
+	f.tew.DirectDoubleMerklePokeInTest(t)
+	require.True(t, f.lists(t, p))
+}
+
+// A member who left and was added again can leave again.
+func TestTeamLeaveTwice(t *testing.T) {
+	f := newLeaveFixture(t)
+	require.NoError(t, f.leave(t, f.bob))
+	_, err := f.alice.tm.RotateKeysIfDue(f.alice.m, f.fqt)
+	require.NoError(t, err)
+	f.tew.DirectDoubleMerklePokeInTest(t)
+
+	f.readd(t, f.bob)
+	require.Contains(t, f.roster(t, f.alice), f.bob.u.uid)
+
+	require.NoError(t, f.leave(t, f.bob))
+	require.False(t, f.lists(t, f.bob))
+	require.NotContains(t, f.roster(t, f.alice), f.bob.u.uid)
+}
+
 // currentKey: p's current key for role in the team, from p's own load.
 func (f *leaveFixture) currentKey(t *testing.T, p leaveParty, role core.RoleKey) core.SharedPrivateSuiter {
 	tr, err := p.tm.LoadTeamWithFQTeam(p.m, f.fqt, libclient.LoadTeamOpts{Refresh: true})

@@ -69,7 +69,9 @@ func (t *TeamMinder) TeamLeave(
 	if !fqt.Host.Eq(t.au.HostID()) {
 		return TeamLeaveError{Which: TeamLeaveOtherHost, Msg: "the team is on another server"}
 	}
-	tr, err := t.LoadTeamWithFQTeam(m, *fqt, LoadTeamOpts{Refresh: true})
+	// The removal record goes with the current membership's removal key:
+	// after a leave (or a removal) and a new add, the kept one is stale.
+	tr, err := t.LoadTeamWithFQTeam(m, *fqt, LoadTeamOpts{Refresh: true, FreshRemovalKey: true})
 	if err != nil {
 		return err
 	}

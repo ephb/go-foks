@@ -302,6 +302,10 @@ type LoadTeamOpts struct {
 	Members   MemberLoadLevel
 	Refresh   bool
 	NoUpdates bool
+	// FreshRemovalKey: with Refresh, get the member's current removal key
+	// from the server, not the one kept from an earlier load (which is
+	// stale after the member left or was removed and was added again).
+	FreshRemovalKey bool
 }
 
 // nextMemberLoad decides the level a reloading TeamRecord's loader runs at,
@@ -500,6 +504,7 @@ func (t *TeamMinder) LoadTeamWithFQTeam(
 	tr.ldr.Arg.MemberLoad = nextMemberLoad(
 		tr.ldr.Arg.MemberLoad, opts.Members, fqt.Team.IsAdHocTeam())
 
+	tr.ldr.freshRemovalKey = opts.FreshRemovalKey
 	tw, err := tr.ldr.Run(m)
 	if err != nil {
 		return nil, err
