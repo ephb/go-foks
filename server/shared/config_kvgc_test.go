@@ -27,4 +27,17 @@ func TestKVGCConfig(t *testing.T) {
 	require.Equal(t, DefaultKVGCConfig().UnlinkedGrace, g.UnlinkedGrace)
 	require.Equal(t, DefaultKVGCConfig().Interval, g.Interval)
 	require.Equal(t, DefaultKVGCConfig().BatchSize, g.BatchSize)
+	require.False(t, g.DryRun)
+	require.Equal(t, 10000, g.MaxFilesPerPass)
+
+	// An unlinked file is kept for 30 days by default, a stalled upload
+	// for a day.
+	require.Equal(t, 30*24*time.Hour, DefaultKVGCConfig().UnlinkedGrace)
+	require.Equal(t, 24*time.Hour, DefaultKVGCConfig().UploadGrace)
+
+	err = json.Unmarshal([]byte(`{"gc":{"enabled":true,"dry_run":true,"max_files_per_pass":50}}`), &k)
+	require.NoError(t, err)
+	g = k.GC()
+	require.True(t, g.DryRun)
+	require.Equal(t, 50, g.MaxFilesPerPass)
 }

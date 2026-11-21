@@ -302,15 +302,28 @@ type KVGCConfig struct {
 	UploadGrace time.Duration
 	// Files collected per shard per transaction batch.
 	BatchSize int
+	// DryRun makes a pass do everything but delete: it locks each file,
+	// checks it again, logs what it would collect and rolls back. Run with
+	// it first after turning the GC on, and read the log.
+	DryRun bool
+	// At most this many files are collected (or, in a dry run, logged) per
+	// pass over all shards; the rest waits for the next pass. It bounds the
+	// first pass on a server that has never been collected.
+	MaxFilesPerPass int
 }
 
 func DefaultKVGCConfig() KVGCConfig {
 	return KVGCConfig{
-		Enabled:       false,
-		Interval:      10 * time.Minute,
-		UnlinkedGrace: time.Hour,
-		UploadGrace:   24 * time.Hour,
-		BatchSize:     100,
+		Enabled:  false,
+		Interval: 10 * time.Minute,
+		// 30 days: a deleted attachment stays readable by file ID that long
+		// (for a device that still has the message), and so does a file that
+		// was unlinked by mistake.
+		UnlinkedGrace:   30 * 24 * time.Hour,
+		UploadGrace:     24 * time.Hour,
+		BatchSize:       100,
+		DryRun:          false,
+		MaxFilesPerPass: 10000,
 	}
 }
 

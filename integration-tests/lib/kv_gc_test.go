@@ -436,3 +436,62 @@ func TestKVGCSkipsBadRow(t *testing.T) {
 	require.GreaterOrEqual(t, st.Unlinked, 1)
 	f.requireCollected(t, fid)
 }
+
+// A dry run reports what a pass would collect and deletes nothing; a pass
+// stops at its file limit and leaves the rest for the next one.
+func TestKVGCDryRunAndLimit(t *testing.T) {
+	f := newGCFixture(t)
+	m := f.tew.MetaContext()
+
+	var fids []proto.FileID
+	for _, name := range []string{"one.bin", "two.bin"} {
+		path := f.path(name)
+		writeRandomFileWithConfig(t, f.kvm, f.m, path, 3*testChunkSize,
+			lcl.KVConfig{MkdirP: true}, 0)
+		fid := f.fileID(t, path)
+		require.NoError(t, f.kvm.Unlink(f.m, lcl.KVConfig{}, path))
+		f.age(t, fid, 2*time.Hour)
+		fids = append(fids, fid)
+	}
+	before := f.usage(t)
+	rows := []gcRow{f.row(t, fids[0]), f.row(t, fids[1])}
+	require.Equal(t, "active", rows[0].status)
+	require.Greater(t, rows[0].chunks, int64(0))
+
+	// Dry: both are counted, with their chunks and bytes, and both stay.
+	opts := gcTestOpts()
+	opts.DryRun = true
+	st, err := kvStore.CollectGarbage(m, opts)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, st.Unlinked, 2)
+	require.GreaterOrEqual(t, int64(st.Chunks), rows[0].chunks+rows[1].chunks)
+	require.Greater(t, st.Bytes, int64(0))
+	require.Equal(t, rows[0], f.row(t, fids[0]))
+	require.Equal(t, rows[1], f.row(t, fids[1]))
+	require.Equal(t, before, f.usage(t))
+	_, err = f.kvm.GetFileChunk(f.m, lcl.KVConfig{}, fids[0], 0)
+	require.NoError(t, err)
+
+	// One file per pass: one of the two goes, then the other.
+	opts = gcTestOpts()
+	opts.MaxFiles = 1
+	st, err = kvStore.CollectGarbage(m, opts)
+	require.NoError(t, err)
+	require.Equal(t, 1, st.Unlinked+st.Uploads)
+	dead := func() int {
+		var n int
+		for _, fid := range fids {
+			if f.row(t, fid).status == "dead" {
+				n++
+			}
+		}
+		return n
+	}
+	require.LessOrEqual(t, dead(), 1)
+
+	st = f.gc(t)
+	require.GreaterOrEqual(t, st.Unlinked, 1)
+	require.Equal(t, 2, dead())
+	f.requireCollected(t, fids[0])
+	f.requireCollected(t, fids[1])
+}

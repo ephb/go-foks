@@ -38,6 +38,12 @@ import (
 // conditions, so a concurrent link, chunk upload or second collector either
 // goes first and the file is skipped, or waits and then sees the tombstone.
 // Replicas can run it at the same time.
+//
+// A dry run (gc.dry_run) does all of that up to the deletes: it locks the
+// row, checks again, counts the chunks, logs what it would collect and rolls
+// back. Its stats are those of the real pass. A pass stops at
+// gc.max_files_per_pass files, so the first pass on a server that was never
+// collected is not one unbounded delete; every collected file is logged.
 
 // GCStats reports one pass.
 type GCStats struct {
@@ -59,6 +65,8 @@ type GCOpts struct {
 	UnlinkedGrace time.Duration
 	UploadGrace   time.Duration
 	BatchSize     int
+	DryRun        bool
+	MaxFiles      int // per pass, over all shards
 }
 
 func GCOptsFromConfig(c shared.KVGCConfig) GCOpts {
@@ -66,6 +74,8 @@ func GCOptsFromConfig(c shared.KVGCConfig) GCOpts {
 		UnlinkedGrace: c.UnlinkedGrace,
 		UploadGrace:   c.UploadGrace,
 		BatchSize:     c.BatchSize,
+		DryRun:        c.DryRun,
+		MaxFiles:      c.MaxFilesPerPass,
 	}
 }
 
@@ -74,6 +84,9 @@ func CollectGarbage(m shared.MetaContext, opts GCOpts) (GCStats, error) {
 	var tot GCStats
 	if opts.BatchSize <= 0 {
 		opts.BatchSize = shared.DefaultKVGCConfig().BatchSize
+	}
+	if opts.MaxFiles <= 0 {
+		opts.MaxFiles = shared.DefaultKVGCConfig().MaxFilesPerPass
 	}
 	// Not ForAllShards: that stops at the first shard that fails, and one
 	// shard that is down or damaged must not keep the others from being
@@ -85,7 +98,9 @@ func CollectGarbage(m shared.MetaContext, opts GCOpts) (GCStats, error) {
 	defer iter.Close()
 	var last error
 	for i := 0; iter.Next(); i++ {
-		st, err := collectNextShard(m, iter, opts)
+		// What is left of the pass's budget. A shard is still visited at 0
+		// (it returns at its first candidate).
+		st, err := collectNextShard(m, iter, opts, opts.MaxFiles-tot.Unlinked-tot.Uploads)
 		tot.add(st)
 		if err != nil {
 			m.Warnw("kv gc: a shard failed; going on with the next", "shardIndex", i, "err", err)
@@ -95,13 +110,13 @@ func CollectGarbage(m shared.MetaContext, opts GCOpts) (GCStats, error) {
 	return tot, last
 }
 
-func collectNextShard(m shared.MetaContext, iter *shared.ConnIter, opts GCOpts) (GCStats, error) {
+func collectNextShard(m shared.MetaContext, iter *shared.ConnIter, opts GCOpts, budget int) (GCStats, error) {
 	db, _, err := iter.Conn(m)
 	if err != nil {
 		return GCStats{}, err
 	}
 	defer db.Release()
-	return collectShard(m, db, opts)
+	return collectShard(m, db, opts, budget)
 }
 
 type gcCandidate struct {
@@ -177,7 +192,8 @@ func loadGCBatch(
 	return ret, bad, rows.Err()
 }
 
-func collectShard(m shared.MetaContext, db *pgxpool.Conn, opts GCOpts) (GCStats, error) {
+// collectShard collects up to budget files on one shard.
+func collectShard(m shared.MetaContext, db *pgxpool.Conn, opts GCOpts, budget int) (GCStats, error) {
 	var tot GCStats
 	// Files we looked at and left (skipped or failed), so the next batch
 	// doesn't pick them again. Collected files drop out of the query.
@@ -201,6 +217,11 @@ func collectShard(m shared.MetaContext, db *pgxpool.Conn, opts GCOpts) (GCStats,
 			return tot, nil
 		}
 		for _, c := range batch {
+			if tot.Unlinked+tot.Uploads >= budget {
+				m.Infow("kv gc: stopping at max_files_per_pass; the rest waits for the next pass",
+					"max", opts.MaxFiles)
+				return tot, nil
+			}
 			st, err := collectFile(m, db, opts, c)
 			if err != nil {
 				// One bad row must not stop the GC for everyone else.
@@ -209,6 +230,10 @@ func collectShard(m shared.MetaContext, db *pgxpool.Conn, opts GCOpts) (GCStats,
 			if err != nil || st.Unlinked+st.Uploads == 0 {
 				left[c.fid] = true
 				continue
+			}
+			if opts.DryRun {
+				// Still there after a dry run: do not pick it again.
+				left[c.fid] = true
 			}
 			tot.add(st)
 		}
@@ -230,11 +255,18 @@ func collectFile(
 		ret = GCStats{}
 		return collectFileTx(m, tx, opts, c, &ret)
 	})
+	if err == errGCDryRun {
+		// The transaction was rolled back, as a dry run wants.
+		return ret, nil
+	}
 	if err != nil {
 		return GCStats{}, err
 	}
 	return ret, nil
 }
+
+// errGCDryRun ends a dry run's transaction: RetryTx rolls back on it.
+var errGCDryRun = core.InternalError("kv gc dry run")
 
 func collectFileTx(
 	m shared.MetaContext,
@@ -318,6 +350,16 @@ func collectFileTx(
 	if err != nil {
 		return err
 	}
+	kind := "unlinked"
+	if st0 == LargeFileStatusUploading {
+		kind = "upload"
+	}
+	if opts.DryRun {
+		setGCStats(st, st0, nChunks, nBytes)
+		m.Infow("kv gc dry run: would collect", "host", c.shid, "party", c.spid,
+			"file", c.fid.KVNodeID(), "kind", kind, "chunks", nChunks, "bytes", nBytes)
+		return errGCDryRun
+	}
 	_, err = tx.Exec(
 		m.Ctx(),
 		`DELETE FROM large_file_chunk
@@ -343,6 +385,13 @@ func collectFileTx(
 	if err != nil {
 		return err
 	}
+	setGCStats(st, st0, nChunks, nBytes)
+	m.Infow("kv gc: collected", "host", c.shid, "party", c.spid,
+		"file", c.fid.KVNodeID(), "kind", kind, "chunks", nChunks, "bytes", nBytes)
+	return nil
+}
+
+func setGCStats(st *GCStats, st0 LargeFileStatus, nChunks int, nBytes int64) {
 	if st0 == LargeFileStatusUploading {
 		st.Uploads = 1
 	} else {
@@ -350,7 +399,6 @@ func collectFileTx(
 	}
 	st.Chunks = nChunks
 	st.Bytes = nBytes
-	return nil
 }
 
 // usageDecLarge undoes what usageCheckAndInc charged for a large file's
@@ -496,8 +544,8 @@ func gcLoop(m shared.MetaContext, cfg shared.KVGCConfig) {
 			m.Warnw("kv gc pass", "err", err)
 		}
 		if st.Unlinked+st.Uploads > 0 {
-			m.Infow("kv gc pass", "unlinked", st.Unlinked, "uploads", st.Uploads,
-				"chunks", st.Chunks, "bytes", st.Bytes)
+			m.Infow("kv gc pass", "dryRun", cfg.DryRun, "unlinked", st.Unlinked,
+				"uploads", st.Uploads, "chunks", st.Chunks, "bytes", st.Bytes)
 		}
 		select {
 		case <-tick.C:

@@ -115,6 +115,8 @@ type KVGCConfigJSON struct {
 	UnlinkedGrace_ Seconds `json:"unlinked_grace_sec"`
 	UploadGrace_   Seconds `json:"upload_grace_sec"`
 	BatchSize_     int     `json:"batch_size"`
+	DryRun_        bool    `json:"dry_run"`
+	MaxFiles_      int     `json:"max_files_per_pass"`
 }
 
 type LooperConfigJSON struct {
@@ -631,6 +633,10 @@ func (k *KVStoreServerConfigJSON) GC() KVGCConfig {
 	}
 	if g.BatchSize_ > 0 {
 		ret.BatchSize = g.BatchSize_
+	}
+	ret.DryRun = g.DryRun_
+	if g.MaxFiles_ > 0 {
+		ret.MaxFilesPerPass = g.MaxFiles_
 	}
 	return ret
 }

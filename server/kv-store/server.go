@@ -94,7 +94,8 @@ func (s *Server) RunBackgroundLoops(m shared.MetaContext, _ chan<- error) error 
 		return nil
 	}
 	m.Infow("kv gc enabled", "interval", s.gc.Interval,
-		"unlinkedGrace", s.gc.UnlinkedGrace, "uploadGrace", s.gc.UploadGrace)
+		"unlinkedGrace", s.gc.UnlinkedGrace, "uploadGrace", s.gc.UploadGrace,
+		"dryRun", s.gc.DryRun, "maxFilesPerPass", s.gc.MaxFilesPerPass)
 	go gcLoop(m, s.gc)
 	return nil
 }
