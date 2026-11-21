@@ -255,6 +255,13 @@ func (p *direntUpdater) checkPermissions(m shared.MetaContext) error {
 	if err != nil {
 		return err
 	}
+	// Nobody gives a name a write role above their own: the name could then
+	// not be changed or removed by its maker's peers or betters up to that
+	// role, in a directory they all write.
+	err = assertAtOrAbove(p.role, p.de.WriteRole, proto.KVOp_Write, proto.KVNodeType_Dir)
+	if err != nil {
+		return err
+	}
 	err = assertAtOrAbove(p.role, p.dir.Box.Rg.Role, proto.KVOp_Read, proto.KVNodeType_Dir)
 	if err != nil {
 		return err
