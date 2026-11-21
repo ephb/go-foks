@@ -452,8 +452,13 @@ func (r *m3Rig) channels(t *testing.T) {
 	merklePoke(t)
 	// bob, a member, sees and reads it.
 	require.Equal(t, design.ID, channelNamed(t, listChannels(r.bob, team), "design").ID)
+	// The whole thread on bob's first page: chatd's line for the new
+	// channel, then the message. (Before chatd filled a short first page
+	// he got the newest message only.)
 	msgs := threadMsgs(r.bob, team, byName("design"))
-	require.Len(t, msgs, 1)
+	require.Len(t, msgs, 2)
+	require.Equal(t, "design kickoff", msgs[0].Body)
+	require.Equal(t, `{"kbf":1,"sys":{"type":"channel_created","name":"design"}}`, msgs[1].Body)
 
 	// bob may create a channel too (FOKS: any member, roles up to his own).
 	r.bob.ok("make_channel", map[string]any{"team": team, "app": 1, "name": "bobs", "desc": "",

@@ -192,10 +192,14 @@ func TestChatdSubprocessAuthenticatedExchange(t *testing.T) {
 		} `json:"messages"`
 	}
 	require.NoError(t, json.Unmarshal(tvResp.Result, &tvRes))
-	require.Len(t, tvRes.Messages, 1)
-	require.Equal(t, uint64(1), tvRes.Messages[0].Seq)
+	// Newest first: the message, then the line chatd posted when the
+	// channel was made (WIRE.md "System lines").
+	require.Len(t, tvRes.Messages, 2)
+	require.Equal(t, uint64(2), tvRes.Messages[0].Seq)
 	require.Equal(t, "hello from chatd subprocess", tvRes.Messages[0].Body)
 	require.NotEmpty(t, tvRes.Messages[0].Sender)
+	require.Equal(t, uint64(1), tvRes.Messages[1].Seq)
+	require.Equal(t, `{"kbf":1,"sys":{"type":"channel_created","name":"general-chat"}}`, tvRes.Messages[1].Body)
 
 	t.Logf("CHATD_AUTH_ENDPOINT addr=%s team=%s channel=general-chat chid=%s user=%s",
 		tcpAddr, tm, mcRes.ID, usersRes.Users[0].Username)

@@ -339,11 +339,28 @@ func TestChatdDeviceAdd(t *testing.T) {
 	require.Equal(t, 3, strings.Count(out, "computer"), "three devices: %s", out)
 	out = kbRun(t, kbBin, c, "", "team", "ls")
 	require.Contains(t, out, teamName)
-	// The tablet reads what both older devices wrote. A device's first
-	// page of a thread can be short (here: the newest message only, with
-	// at_beginning false), so page back to the start.
+	// The tablet reads what both older devices wrote, on its first page
+	// of the thread: FOKS has only the newest message in the new device's
+	// cache and answered just that one, with at_beginning false, until
+	// chatd filled the page from the server (chat-foks notes/15, 7).
+	var first struct {
+		Messages []struct {
+			Body string `json:"body"`
+		} `json:"messages"`
+		AtBeginning bool `json:"at_beginning"`
+	}
+	c.ok("get_thread_view", map[string]any{"team": team, "app": 1, "channel": deflt, "before": 0, "num": 50}, &first)
+	var firstPage []string
+	for _, m := range first.Messages {
+		firstPage = append(firstPage, m.Body)
+	}
+	t.Logf("the tablet's first page: %q, at_beginning %v", firstPage, first.AtBeginning)
+	require.ElementsMatch(t, []string{"written on the desk", "written on the laptop"}, firstPage,
+		"the first page of the thread on a new device")
+	require.True(t, first.AtBeginning, "the first page reaches the beginning")
 	require.ElementsMatch(t, []string{"written on the desk", "written on the laptop"}, wholeThread(c, team, deflt))
-	out = kbRun(t, kbBin, c, "", "chat", "read", teamName, "-n", "10")
+	out = kbRun(t, kbBin, c, "", "chat", "read", teamName, "-n", "10", "--peek")
 	t.Logf("kb chat read on the tablet:\n%s", out)
 	require.Contains(t, out, "written on the laptop")
+	require.Contains(t, out, "written on the desk")
 }
