@@ -27,19 +27,39 @@ func (d *Minder) SetTyping(
 	channel lcl.RTChannelSpecifier,
 	on bool,
 ) error {
-	err := assertTeam(team)
+	chid, err := d.ResolveChannelID(m, team, appID, channel)
 	if err != nil {
 		return err
+	}
+	return d.SetTypingByID(m, *chid, on)
+}
+
+// ResolveChannelID returns the ID of the channel a specifier names. It
+// lists the team's channels from the server (one call), so a caller that
+// needs the ID often -- SetTypingByID on every few key presses -- should
+// keep the answer.
+func (d *Minder) ResolveChannelID(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+) (
+	*proto.RTChannelID,
+	error,
+) {
+	err := assertTeam(team)
+	if err != nil {
+		return nil, err
 	}
 	rtp, err := d.base.GetParty(m.Base(), team)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ch, err := d.resolveChannel(m, rtp, appID, channel)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return d.SetTypingByID(m, ch.Id, on)
+	return &ch.Id, nil
 }
 
 // SetTypingByID is SetTyping for a caller that already knows the channel's
