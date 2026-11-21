@@ -24,6 +24,10 @@ type TeamLeaveOpts struct {
 	// client can make and right before the link goes to the server, while
 	// the user is still a member (an app posts "bob left" here).
 	BeforePost func(m MetaContext)
+
+	// TestEditArg, for tests only: changes what is posted, as a modified
+	// client could.
+	TestEditArg func(arg *rem.EditTeamArg)
 }
 
 // TeamLeaveError: the active user can't leave the team this way. Which
@@ -77,7 +81,7 @@ func (t *TeamMinder) TeamLeave(
 	if opts.BeforePost != nil {
 		opts.BeforePost(m)
 	}
-	err = l.post(m)
+	err = l.post(m, opts.TestEditArg)
 	if err != nil {
 		return err
 	}
@@ -264,18 +268,22 @@ func (t *TeamMinder) prepareLeave(m MetaContext, tr *TeamRecord) (*teamLeaver, e
 	}, nil
 }
 
-func (l *teamLeaver) post(m MetaContext) error {
+func (l *teamLeaver) post(m MetaContext, testEdit func(*rem.EditTeamArg)) error {
 	cli, err := l.tm.au.TeamAdminClient(m)
 	if err != nil {
 		return err
 	}
-	_, err = cli.EditTeam(m.Ctx(), rem.EditTeamArg{
+	arg := rem.EditTeamArg{
 		Link:             *l.link.Link,
 		NextTreeLocation: *l.link.NextTreeLocation,
 		Obd: rem.OffchainBoxData{
 			Removals: []rem.TeamRemovalAndComm{l.removal},
 		},
-	})
+	}
+	if testEdit != nil {
+		testEdit(&arg)
+	}
+	_, err = cli.EditTeam(m.Ctx(), arg)
 	return err
 }
 

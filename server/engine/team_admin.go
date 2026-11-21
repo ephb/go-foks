@@ -401,6 +401,7 @@ func (c *teamEditor) insertRemoteMemberViewTokens(
 		c.tx,
 		c.teamID,
 		c.arg.Obd.RemoteMemberViewTokens,
+		c.openres.Sched.Additions,
 	)
 }
 
@@ -714,6 +715,11 @@ func (c *teamEditor) runEditCommon(m shared.MetaContext) error {
 	}
 
 	err = c.checkLeave(m)
+	if err != nil {
+		return err
+	}
+
+	err = c.checkLinkKindArg()
 	if err != nil {
 		return err
 	}

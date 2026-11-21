@@ -266,6 +266,48 @@ func TestTeamLeaveAdmin(t *testing.T) {
 	require.Empty(t, f.due(t, f.bob))
 }
 
+// A leave is posted by a member who need not be an admin: it may carry its
+// own removal and nothing else. Each extra is refused, the member stays in
+// the team, and a plain leave afterwards works.
+func TestTeamLeaveCarriesNothingElse(t *testing.T) {
+	f := newLeaveFixture(t)
+
+	otherHost := f.fqt.Host
+	otherHost[len(otherHost)-1] ^= 0x1
+	extras := map[string]func(a *rem.EditTeamArg){
+		"a remote member's view token": func(a *rem.EditTeamArg) {
+			a.Obd.RemoteMemberViewTokens = []proto.TeamRemoteMemberViewToken{{
+				Team: f.fqt.Team,
+				Inner: proto.TeamRemoteMemberViewTokenInner{
+					Member:  proto.FQParty{Party: f.alice.u.uid.ToPartyID(), Host: otherHost},
+					PtkGen:  proto.FirstGeneration,
+					PtkRole: proto.DefaultRole,
+				},
+			}}
+		},
+		"key boxes": func(a *rem.EditTeamArg) {
+			a.Obd.PtkBoxes = proto.SharedKeyBoxSet{Boxes: []proto.SharedKeyBox{{
+				Gen:  proto.FirstGeneration,
+				Role: proto.DefaultRole,
+			}}}
+		},
+		"a seed chain element": func(a *rem.EditTeamArg) {
+			a.Obd.SeedChain = []proto.SeedChainBox{{Gen: proto.FirstGeneration, Role: proto.DefaultRole}}
+		},
+		"a second removal": func(a *rem.EditTeamArg) {
+			a.Obd.Removals = append(a.Obd.Removals, a.Obd.Removals[0])
+		},
+	}
+	for name, extra := range extras {
+		err := f.bob.tm.TeamLeave(f.bob.m, f.fqtp, libclient.TeamLeaveOpts{TestEditArg: extra})
+		require.Error(t, err, name)
+		f.tew.DirectDoubleMerklePokeInTest(t)
+		require.Contains(t, f.roster(t, f.alice), f.bob.u.uid, name)
+	}
+	require.NoError(t, f.leave(t, f.bob))
+	require.NotContains(t, f.roster(t, f.alice), f.bob.u.uid)
+}
+
 // currentKey: p's current key for role in the team, from p's own load.
 func (f *leaveFixture) currentKey(t *testing.T, p leaveParty, role core.RoleKey) core.SharedPrivateSuiter {
 	tr, err := p.tm.LoadTeamWithFQTeam(p.m, f.fqt, libclient.LoadTeamOpts{Refresh: true})

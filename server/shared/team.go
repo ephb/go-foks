@@ -934,19 +934,45 @@ func loadTeamCertByHashWithDB(
 	return &ret, nil
 }
 
+// InsertRemoteMemberViewTokens stores the view tokens an admin boxed for
+// remote members the link adds (and approves their join requests). A token
+// for anyone the link does not add is refused: it would overwrite that
+// member's token (and so break their loads) or approve a request nobody
+// admitted.
 func InsertRemoteMemberViewTokens(
 	m MetaContext,
 	tx pgx.Tx,
-	team proto.TeamID,
+	teamID proto.TeamID,
 	toks []proto.TeamRemoteMemberViewToken,
+	additions []team.MemberID,
 ) error {
+
+	added := func(p proto.FQParty) (bool, error) {
+		fx, err := p.Party.EntityID().Fixed()
+		if err != nil {
+			return false, err
+		}
+		for _, a := range additions {
+			if a.Fqe.Entity.Eq(fx) && a.Fqe.Host.Eq(p.Host) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
 
 	for _, tok := range toks {
 		if tok.Inner.Member.Host.Eq(m.HostID().Id) {
 			return core.TeamError("cannot insert local member view token")
 		}
-		if !tok.Team.Eq(team) {
+		if !tok.Team.Eq(teamID) {
 			return core.TeamError("wrong team for token")
+		}
+		ok, err := added(tok.Inner.Member)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return core.TeamError("view token for a member this change does not add")
 		}
 		b, err := core.EncodeToBytes(&tok.Inner.SecretBox)
 		if err != nil {
@@ -970,7 +996,7 @@ func InsertRemoteMemberViewTokens(
 			DO UPDATE SET secret_box=$6, mtime=NOW(), 
 				ptk_role_type=$7, ptk_viz_level=$8`,
 			m.ShortHostID().ExportToDB(),
-			team.ExportToDB(),
+			teamID.ExportToDB(),
 			tok.Inner.Member.Party.ExportToDB(),
 			tok.Inner.Member.Host.ExportToDB(),
 			int(tok.Inner.PtkGen),
@@ -989,7 +1015,7 @@ func InsertRemoteMemberViewTokens(
 			 WHERE short_host_id=$2 AND team_id=$3 AND state=$4 AND token=$5`,
 			JoinReqStateApproved,
 			m.ShortHostID().ExportToDB(),
-			team.ExportToDB(),
+			teamID.ExportToDB(),
 			JoinReqStatePending,
 			tok.Jrt.ExportToDB(),
 		)
