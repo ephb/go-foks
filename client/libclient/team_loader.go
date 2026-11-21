@@ -1149,6 +1149,12 @@ func (l *TeamLoader) checkMerkleRoot(m MetaContext) error {
 
 func (l *TeamLoader) openLinks(m MetaContext) error {
 	roster := l.rosterPre
+	// otlrs pairs up with this run's l.raw.Links by index. A run that
+	// failed after this point (say on a merkle path the server's tree did
+	// not have yet) left its links here, and the next run, which does not
+	// start from the preload, would have played links at the wrong index
+	// (an index-out-of-range panic in playLinks).
+	l.otlrs = nil
 	for n, link := range l.raw.Links {
 		otlr, err := team.OpenTeamLink(&link, l.hepks, &l.Arg.Team.Team, l.Arg.Team.Host, roster)
 		if err != nil {
