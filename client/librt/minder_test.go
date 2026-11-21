@@ -196,3 +196,69 @@ func TestCookNonceBindsHost(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func seqsOf(v []ThreadMessage) []int {
+	out := make([]int, len(v))
+	for i, m := range v {
+		out[i] = m.Seq.Int()
+	}
+	return out
+}
+
+func descending(from, to int) []int {
+	var out []int
+	for i := from; i >= to; i-- {
+		out = append(out, i)
+	}
+	return out
+}
+
+func TestRecentWindow(t *testing.T) {
+	// A device that had seqs 1..100 and was away for 4200 messages: the inbox
+	// sync cached the newest message (4300), and a read of the last 50 found
+	// nothing newer. Only 4299..4251 is asked for, not the gap down to 100.
+	cached := append([]int{4300}, descending(100, 52)...)
+	kept, holes, err := recentWindow(threadMsgsFromSeqs(cached...), 50)
+	require.NoError(t, err)
+	require.Equal(t, []int{4300}, seqsOf(kept))
+	require.Equal(t, seqList(descending(4299, 4251)...), holes)
+	require.LessOrEqual(t, len(holes), 50)
+
+	// Fresh rows on top of an old tail: the window is counted from the top.
+	kept, holes, err = recentWindow(threadMsgsFromSeqs(4300, 4299, 4298, 100, 99), 5)
+	require.NoError(t, err)
+	require.Equal(t, []int{4300, 4299, 4298}, seqsOf(kept))
+	require.Equal(t, seqList(4297, 4296), holes)
+
+	// A hole inside the window, cached rows on both sides of its lower edge.
+	kept, holes, err = recentWindow(threadMsgsFromSeqs(10, 9, 7, 6, 5, 4), 5)
+	require.NoError(t, err)
+	require.Equal(t, []int{10, 9, 7, 6}, seqsOf(kept))
+	require.Equal(t, seqList(8), holes)
+
+	// Nothing missing.
+	kept, holes, err = recentWindow(threadMsgsFromSeqs(5, 4, 3, 2, 1), 5)
+	require.NoError(t, err)
+	require.Equal(t, []int{5, 4, 3, 2, 1}, seqsOf(kept))
+	require.Empty(t, holes)
+
+	// A thread shorter than the window: down to seq 1, never below.
+	kept, holes, err = recentWindow(threadMsgsFromSeqs(3), 50)
+	require.NoError(t, err)
+	require.Equal(t, []int{3}, seqsOf(kept))
+	require.Equal(t, seqList(2, 1), holes)
+
+	// Nothing at all.
+	kept, holes, err = recentWindow(nil, 50)
+	require.NoError(t, err)
+	require.Empty(t, kept)
+	require.Empty(t, holes)
+
+	// A run that is not newest-first is refused, as findHoles refuses it.
+	_, _, err = recentWindow(threadMsgsFromSeqs(1, 2, 3), 5)
+	require.Error(t, err)
+	_, _, err = recentWindow(threadMsgsFromSeqs(3, 3), 5)
+	require.Error(t, err)
+	_, _, err = recentWindow(threadMsgsFromSeqs(0), 5)
+	require.Error(t, err)
+}

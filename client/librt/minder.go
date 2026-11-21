@@ -1535,6 +1535,60 @@ func findHoles(
 	return ret, nil
 }
 
+// recentWindow cuts a newest-first run (fresh rows, then cached ones) down to
+// the window a read of the num most recent messages can return: the seqs from
+// the newest one down, num of them at most. It returns the rows inside the
+// window and the seqs missing from it, newest first.
+//
+// Rows below the window are dropped and nothing below it is asked for. The
+// cache can be sparse there -- a device that was away has its old tail and,
+// from the inbox sync's prefetch, the channel's newest message -- and filling
+// the whole span between would download the gap, or fail outright once it is
+// longer than the server takes in one query.
+func recentWindow(
+	v []ThreadMessage,
+	num uint,
+) (
+	[]ThreadMessage,
+	[]proto.RTMsgSeq,
+	error,
+) {
+	if len(v) == 0 || num == 0 {
+		return v, nil, nil
+	}
+	// Also checks that the run is strictly descending with valid seqs.
+	_, err := findHoles(v)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !v[0].Seq.IsValid() {
+		return nil, nil, core.BadServerDataError("msg with invalid seqno")
+	}
+	if len(v) > 1 && v[1].Seq.Int() > v[0].Seq.Int() {
+		return nil, nil, core.BadServerDataError("non-monotonic thread msg sequence")
+	}
+	top := v[0].Seq.Int()
+	lo := top - int(num) + 1
+	if lo < 1 {
+		lo = 1
+	}
+	end := len(v)
+	for end > 0 && v[end-1].Seq.Int() < lo {
+		end--
+	}
+	v = v[:end]
+	var holes []proto.RTMsgSeq
+	ptr := 0
+	for i := top; i >= lo; i-- {
+		if ptr < len(v) && v[ptr].Seq.Int() == i {
+			ptr++
+			continue
+		}
+		holes = append(holes, proto.RTMsgSeq(i))
+	}
+	return v, holes, nil
+}
+
 type initReqResult struct {
 	hostId lib.HostID
 	rtp    *RTParty
@@ -2214,9 +2268,9 @@ func (d *Minder) GetThreadRecentMsgs(
 		return &ThreadReadResult{Msgs: freshPlain, Chid: irr.ch.Id}, nil
 	}
 
-	// in order, but with holes
-	combined := append(freshPlain, cached...)
-	holes, err := findHoles(combined)
+	// in order, but with holes. Only the window that can be returned is
+	// filled: see recentWindow.
+	combined, holes, err := recentWindow(append(freshPlain, cached...), num)
 	if err != nil {
 		return nil, err
 	}
