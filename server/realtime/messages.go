@@ -319,10 +319,16 @@ func (s *messageSender) fanoutInboxVersions(
 	// count against their unread badge. No extra version is consumed -- the row
 	// was bumping for the delivery anyway, so other devices pick the read state
 	// up along with the message.
+	//
+	// A delivery also clears the member's hidden flag (rtSetChannelFlags):
+	// "hidden" means out of the inbox until something new arrives, so a
+	// client need not remember what was newest when the user hid it. Muted
+	// is left alone.
 	_, err = s.tx.Exec(
 		m.Ctx(),
 		`UPDATE user_channels uc
 		 SET inbox_version = ui.inbox_version, last_msg_time = $3, mtime = NOW(),
+		     hidden = false,
 		     read_through = CASE WHEN uc.uid = $4
 		                         THEN GREATEST(uc.read_through, $5)
 		                         ELSE uc.read_through END

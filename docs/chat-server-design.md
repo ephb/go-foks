@@ -473,8 +473,11 @@ or muted for a user.
 only, authorized like a read of the channel. A change bumps the caller's
 inbox version and stamps the row at it, as a read mark does, so the user's
 other devices pick the flags up with their next `rtGetChangedThreads`; a
-call that changes nothing bumps nothing. The server gives the flags no
-meaning of its own.
+call that changes nothing bumps nothing. The server gives `muted` no
+meaning of its own. `hidden` it clears for every member when a message is
+delivered to the channel: hidden means out of the inbox until something
+new arrives, and this way a client need not remember what was newest when
+the user hid the channel.
 
 #### user_inbox
 

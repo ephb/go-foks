@@ -360,7 +360,9 @@ protocol RealTime
     // the channel (as for rtReadThrough). A change bumps the caller's inbox
     // version, so their other devices pick it up on their next sync; a call
     // that changes nothing bumps nothing. The server only stores the flags:
-    // what "muted" silences is the client's business.
+    // what "muted" silences is the client's business. A message delivered
+    // to the channel clears every member's hidden flag: a hidden channel is
+    // out of the inbox until something new arrives.
     rtSetChannelFlags @19 (
         chid @0 : lib.RTChannelID,
         muted @1 : Option(Bool),

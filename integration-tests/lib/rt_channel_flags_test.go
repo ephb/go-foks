@@ -151,3 +151,40 @@ func TestRTSetChannelFlagsRefusals(t *testing.T) {
 	require.False(t, row.Muted)
 	require.False(t, row.Hidden)
 }
+
+// A hidden channel comes back with its next message, for whoever hid it;
+// a read mark does not bring it back, and muted stays.
+func TestRTHiddenUntilNextMessage(t *testing.T) {
+	sc := setupTypingScene(t)
+	yes := true
+	spec := lcl.NewRTChannelSpecifierWithId(sc.chid)
+	send := func(a *typingActor, text string) {
+		_, err := a.minder.Send(a.m, sc.teamCfg(), proto.RTAppID_Chat, spec, []byte(text))
+		require.NoError(t, err)
+	}
+	send(sc.ada, "one")
+
+	require.NoError(t, sc.bo.minder.SetChannelFlagsByID(sc.bo.m, sc.chid, &yes, &yes))
+	require.NoError(t, sc.ada.minder.SetChannelFlagsByID(sc.ada.m, sc.chid, nil, &yes))
+	row := sc.flagsOf(t, sc.bo, sc.chid)
+	require.True(t, row.Hidden)
+	require.True(t, row.Muted)
+
+	// Reading what is there is not news.
+	_, err := sc.bo.minder.GetThreadView(sc.bo.m, sc.teamCfg(), proto.RTAppID_Chat, spec, 0, 10)
+	require.NoError(t, err)
+	row = sc.flagsOf(t, sc.bo, sc.chid)
+	require.True(t, row.Hidden, "a read mark must not bring the channel back")
+
+	send(sc.cy, "two")
+	row = sc.flagsOf(t, sc.bo, sc.chid)
+	require.False(t, row.Hidden, "the next message brings the channel back")
+	require.True(t, row.Muted, "muted is not touched by a message")
+	require.False(t, sc.flagsOf(t, sc.ada, sc.chid).Hidden)
+
+	// Hiding again works, and the hider's own message brings it back too.
+	require.NoError(t, sc.bo.minder.SetChannelFlagsByID(sc.bo.m, sc.chid, nil, &yes))
+	require.True(t, sc.flagsOf(t, sc.bo, sc.chid).Hidden)
+	send(sc.bo, "three")
+	require.False(t, sc.flagsOf(t, sc.bo, sc.chid).Hidden)
+}
