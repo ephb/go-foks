@@ -394,11 +394,6 @@ func (t *TeamWrapper) AllFQStrings() ([]proto.FQTeamString, error) {
 	return ret, nil
 }
 
-// VerifiedAt is when this team's snapshot was last confirmed against the
-// server's merkle root. It dates the verification rather than the read: an
-// offline load serves a snapshot without advancing it, so the gap between this
-// and now is how stale the caller's view actually is. Zero means the snapshot
-// predates the field.
 // RotationDue lists the roles whose current key a member who has left
 // could read, with the first such leave (lib/team/leave.go). Empty when
 // no key rotation is due.
@@ -406,6 +401,11 @@ func (l *TeamWrapper) RotationDue() (team.RotationDue, error) {
 	return importRotationDue(l.prot.RotationDue)
 }
 
+// VerifiedAt is when this team's snapshot was last confirmed against the
+// server's merkle root. It dates the verification rather than the read: an
+// offline load serves a snapshot without advancing it, so the gap between this
+// and now is how stale the caller's view actually is. Zero means the snapshot
+// predates the field.
 func (l *TeamWrapper) VerifiedAt() proto.Time {
 	return l.prot.VerifiedAt
 }
