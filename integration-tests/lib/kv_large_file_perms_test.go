@@ -242,3 +242,77 @@ func TestLargeFileStatusNotDisclosedBelowRole(t *testing.T) {
 	})
 	require.Equal(t, core.KVUploadInProgressError{}, err)
 }
+
+// A later chunk is held to the file's read role as the first one is: a
+// member under it who knows the file ID cannot write into an upload that is
+// running (and so break it, or finish it with their own bytes).
+func TestLargeFileChunkRoleEnforced(t *testing.T) {
+	f := setupLargeFileRoleFixture(t)
+	mAdmin, adminCli, adminAuth := f.rawFor(t, f.admin)
+
+	var fid proto.FileID
+	require.NoError(t, core.RandomFill(fid[:]))
+
+	// As in TestKVFileChunkReplay: a full chunk moves the offset by 4096.
+	const full = 4096 + 3 + 16
+	mk := func(n int) proto.NaclCiphertext {
+		b := make([]byte, n)
+		require.NoError(t, core.RandomFill(b))
+		return proto.NaclCiphertext(b)
+	}
+	c0, c1, c2 := mk(full), mk(full), mk(100)
+
+	err := adminCli.KvFileUploadInit(mAdmin.Ctx(), rem.KvFileUploadInitArg{
+		Auth:   adminAuth,
+		FileID: fid,
+		Md: proto.LargeFileMetadata{
+			Rg:   proto.RoleAndGen{Role: proto.AdminRole, Gen: proto.FirstGeneration},
+			Vers: proto.KVVersion(1),
+		},
+		Chunk: proto.UploadChunk{Data: c0, Offset: 0},
+	})
+	require.NoError(t, err)
+
+	mReader, readerCli, readerAuth := f.rawFor(t, f.reader)
+	// Garbage in the middle, and an early end: both refused.
+	err = readerCli.KvFileUploadChunk(mReader.Ctx(), rem.KvFileUploadChunkArg{
+		Auth:   readerAuth,
+		FileID: fid,
+		Chunk:  proto.UploadChunk{Data: mk(full), Offset: 4096},
+	})
+	require.Equal(t, wantLargeFilePermErr(), err)
+	err = readerCli.KvFileUploadChunk(mReader.Ctx(), rem.KvFileUploadChunkArg{
+		Auth:   readerAuth,
+		FileID: fid,
+		Chunk: proto.UploadChunk{
+			Data: mk(100), Offset: 4096,
+			Final: &proto.UploadFinal{Sz: proto.Size(full + 100)},
+		},
+	})
+	require.Equal(t, wantLargeFilePermErr(), err)
+
+	// The upload goes on untouched for the admin who runs it.
+	err = adminCli.KvFileUploadChunk(mAdmin.Ctx(), rem.KvFileUploadChunkArg{
+		Auth:   adminAuth,
+		FileID: fid,
+		Chunk:  proto.UploadChunk{Data: c1, Offset: 4096},
+	})
+	require.NoError(t, err)
+	err = adminCli.KvFileUploadChunk(mAdmin.Ctx(), rem.KvFileUploadChunkArg{
+		Auth:   adminAuth,
+		FileID: fid,
+		Chunk: proto.UploadChunk{
+			Data: c2, Offset: 8192,
+			Final: &proto.UploadFinal{Sz: proto.Size(2*full + 100)},
+		},
+	})
+	require.NoError(t, err)
+
+	// And the reader gets no further once it is finished.
+	err = readerCli.KvFileUploadChunk(mReader.Ctx(), rem.KvFileUploadChunkArg{
+		Auth:   readerAuth,
+		FileID: fid,
+		Chunk:  proto.UploadChunk{Data: c1, Offset: 4096},
+	})
+	require.Equal(t, wantLargeFilePermErr(), err)
+}
