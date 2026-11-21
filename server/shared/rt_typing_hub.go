@@ -24,6 +24,15 @@ const (
 	// once, as far as the fan-out goes. Past it a new typer is dropped; a
 	// client shows "several people are typing" long before.
 	RTTypingMaxPerChannel = 16
+	// RTTypingMaxPerSender caps the fan-outs ("typing" or "stopped") one
+	// user gets in any RTTypingMinInterval, over all channels together.
+	// Without it the per-channel interval alone would let a member of many
+	// channels wake the other members' polls as often as it has channels.
+	RTTypingMaxPerSender = 4
+	// RTTypingMinReturnInterval is the least time between two results of a
+	// recipient's polls that carry nothing but typing states. States that
+	// arrive inside it are handed over together when it ends.
+	RTTypingMinReturnInterval = time.Second
 	// RTTypingMaxPerInbox caps the states held for one recipient.
 	RTTypingMaxPerInbox = 64
 	// RTTypingMaxAudience is the largest number of readers a typing state is
@@ -43,6 +52,38 @@ type rtTypingSender struct {
 	lastOn time.Time // the last fan-out of "typing"
 	until  time.Time // when that state runs out
 	on     bool      // false once "stopped" was fanned out
+}
+
+// rtTypingBudgetKey is one sender across all channels of a host.
+type rtTypingBudgetKey struct {
+	host core.ShortHostID
+	uid  proto.UID
+}
+
+// rtTypingBudget holds the times of a sender's last admitted fan-outs.
+type rtTypingBudget struct {
+	at   [RTTypingMaxPerSender]time.Time
+	next int
+}
+
+// has reports whether another fan-out fits: the oldest of the last
+// RTTypingMaxPerSender lies a whole interval back (or the clock went back).
+func (b *rtTypingBudget) has(now time.Time) bool {
+	if b == nil {
+		return true
+	}
+	oldest := b.at[b.next]
+	return oldest.IsZero() || now.Sub(oldest) >= RTTypingMinInterval || now.Before(oldest)
+}
+
+// idle reports whether nothing in the budget counts any more.
+func (b *rtTypingBudget) idle(now time.Time) bool {
+	for _, t := range b.at {
+		if !t.IsZero() && now.Sub(t) < RTTypingMinInterval && !now.Before(t) {
+			return false
+		}
+	}
+	return true
 }
 
 type rtTypingItemKey struct {
@@ -75,6 +116,8 @@ type rtTypingItem struct {
 type RTTypingHub struct {
 	sync.Mutex
 	senders   map[RTTypingChannelKey]map[proto.UID]*rtTypingSender
+	budgets   map[rtTypingBudgetKey]*rtTypingBudget
+	returned  map[RTInboxHubKey]time.Time // the last typing-only poll result
 	inboxes   map[RTInboxHubKey]map[rtTypingItemKey]rtTypingItem
 	waiters   map[RTInboxHubKey]map[chan struct{}]bool
 	lastStamp uint64
@@ -83,9 +126,11 @@ type RTTypingHub struct {
 
 func NewRTTypingHub() *RTTypingHub {
 	return &RTTypingHub{
-		senders: make(map[RTTypingChannelKey]map[proto.UID]*rtTypingSender),
-		inboxes: make(map[RTInboxHubKey]map[rtTypingItemKey]rtTypingItem),
-		waiters: make(map[RTInboxHubKey]map[chan struct{}]bool),
+		senders:  make(map[RTTypingChannelKey]map[proto.UID]*rtTypingSender),
+		budgets:  make(map[rtTypingBudgetKey]*rtTypingBudget),
+		returned: make(map[RTInboxHubKey]time.Time),
+		inboxes:  make(map[RTInboxHubKey]map[rtTypingItemKey]rtTypingItem),
+		waiters:  make(map[RTInboxHubKey]map[chan struct{}]bool),
 	}
 }
 
@@ -96,12 +141,25 @@ func NewRTTypingHub() *RTTypingHub {
 //
 // "Typing" is admitted at most once per RTTypingMinInterval per user and
 // channel, and not for a new typer while RTTypingMaxPerChannel others are
-// live. "Stopped" is admitted once, and only while the user's "typing" is
-// still live.
+// typing (those who stopped or ran out do not count). "Stopped" is admitted
+// once, and only while the user's "typing" is still live. Either kind is
+// admitted at most RTTypingMaxPerSender times per RTTypingMinInterval per
+// user, over all channels.
 func (h *RTTypingHub) Admit(k RTTypingChannelKey, uid proto.UID, on bool, now time.Time) bool {
 	h.Lock()
 	defer h.Unlock()
 	h.sweepLocked(now)
+
+	bk := rtTypingBudgetKey{host: k.HostID, uid: uid}
+	budget := h.budgets[bk]
+	spend := func() {
+		if budget == nil {
+			budget = &rtTypingBudget{}
+			h.budgets[bk] = budget
+		}
+		budget.at[budget.next] = now
+		budget.next = (budget.next + 1) % len(budget.at)
+	}
 
 	set := h.senders[k]
 	s := set[uid]
@@ -109,16 +167,24 @@ func (h *RTTypingHub) Admit(k RTTypingChannelKey, uid proto.UID, on bool, now ti
 		if s == nil || !s.on || !now.Before(s.until) {
 			return false
 		}
+		// Out of budget: the state stays "typing" and runs out by itself.
+		if !budget.has(now) {
+			return false
+		}
 		s.on = false
+		spend()
 		return true
 	}
 	if s != nil && now.Sub(s.lastOn) < RTTypingMinInterval {
 		return false
 	}
+	if !budget.has(now) {
+		return false
+	}
 	if s == nil {
 		live := 0
 		for _, o := range set {
-			if now.Before(o.until) {
+			if o.on && now.Before(o.until) {
 				live++
 			}
 		}
@@ -135,7 +201,33 @@ func (h *RTTypingHub) Admit(k RTTypingChannelKey, uid proto.UID, on bool, now ti
 	s.lastOn = now
 	s.until = now.Add(RTTypingTTL)
 	s.on = true
+	spend()
 	return true
+}
+
+// ReturnDelay is how long a poll of k has to hold a result that carries
+// nothing but typing states: what is left of RTTypingMinReturnInterval since
+// the last such result, or zero. However often the states change, a
+// recipient's poll loop then turns at most once per interval because of them.
+func (h *RTTypingHub) ReturnDelay(k RTInboxHubKey, now time.Time) time.Duration {
+	h.Lock()
+	defer h.Unlock()
+	last, ok := h.returned[k]
+	if !ok || now.Before(last) {
+		return 0
+	}
+	if d := RTTypingMinReturnInterval - now.Sub(last); d > 0 {
+		return d
+	}
+	return 0
+}
+
+// NoteReturn records that a poll of k answered with typing states only.
+func (h *RTTypingHub) NoteReturn(k RTInboxHubKey, now time.Time) {
+	h.Lock()
+	defer h.Unlock()
+	h.sweepLocked(now)
+	h.returned[k] = now
 }
 
 // Publish records from's state for each recipient and wakes their parked
@@ -270,6 +362,14 @@ func (h *RTTypingHub) Size() (senders int, items int) {
 	return senders, items
 }
 
+// sizeLimits reports how many budget and poll-return entries the hub holds.
+// For tests.
+func (h *RTTypingHub) sizeLimits() (budgets int, returned int) {
+	h.Lock()
+	defer h.Unlock()
+	return len(h.budgets), len(h.returned)
+}
+
 func pruneTypingInbox(box map[rtTypingItemKey]rtTypingItem, now time.Time) {
 	for ik, it := range box {
 		if !now.Before(it.until) {
@@ -301,6 +401,16 @@ func (h *RTTypingHub) sweepLocked(now time.Time) {
 		pruneTypingInbox(box, now)
 		if len(box) == 0 {
 			delete(h.inboxes, k)
+		}
+	}
+	for k, b := range h.budgets {
+		if b.idle(now) {
+			delete(h.budgets, k)
+		}
+	}
+	for k, t := range h.returned {
+		if now.Sub(t) >= RTTypingMinReturnInterval || now.Before(t) {
+			delete(h.returned, k)
 		}
 	}
 }

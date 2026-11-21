@@ -360,9 +360,38 @@ func PollInbox(
 		if vers > arg.Since {
 			return result(true, vers), nil
 		}
+		// typingOnly answers with the typing states alone, but at most once
+		// per shared.RTTypingMinReturnInterval for this inbox: inside it the
+		// poll waits (for the interval's end, a bump or the caller going
+		// away) and then reads the states once, so that states changing
+		// quickly reach the caller together and its poll loop does not turn
+		// with each of them. The version read above still stands as long as
+		// ch has not fired. A nil, nil return means "go around again": a
+		// bump came, or the states ran out.
+		typingOnly := func() (*proto.RTInboxPollRes, error) {
+			wait := thub.ReturnDelay(key, m.G().Clock().Now())
+			if wait > 0 {
+				hold := time.NewTimer(wait)
+				defer hold.Stop()
+				select {
+				case <-hold.C:
+				case <-ch:
+					return nil, nil
+				case <-m.Ctx().Done():
+					return nil, m.Ctx().Err()
+				}
+			}
+			res := result(false, vers)
+			if len(res.Typing) == 0 {
+				return nil, nil
+			}
+			thub.NoteReturn(key, m.G().Clock().Now())
+			return res, nil
+		}
+
 		res := result(false, vers)
 		if len(res.Typing) > 0 {
-			return res, nil
+			return typingOnly()
 		}
 		remain := time.Until(deadline)
 		if remain <= 0 {
@@ -374,12 +403,10 @@ func PollInbox(
 		case <-ch:
 			// Woken; the next round re-reads.
 		case <-tch:
-			// A typing state arrived. The version read above still stands
-			// (ch has not fired), so answer without another read. If the
-			// state ran out in the meantime, go around again.
-			res = result(false, vers)
-			if len(res.Typing) > 0 {
-				return res, nil
+			// A typing state arrived: answer without another read.
+			res, err := typingOnly()
+			if res != nil || err != nil {
+				return res, err
 			}
 		case <-m.Ctx().Done():
 			return nil, m.Ctx().Err()
