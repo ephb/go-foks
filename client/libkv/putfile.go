@@ -427,7 +427,7 @@ func (k *Minder) PutFileChunk(
 ) error {
 	kvp, _, err := k.initReqWrite(m, cfg)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	us := kvp.caches.upload[id]
