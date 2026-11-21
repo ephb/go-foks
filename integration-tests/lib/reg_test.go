@@ -1115,8 +1115,22 @@ func TestGetNextTreeLocation(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
+	// On Windows the client keeps all its state in %LocalAppData%\foks and
+	// ignores the home a test sets (Win32.foksDir in client/libclient/home.go
+	// reads the variable directly). Without this the test clients read and
+	// write the real home of whoever runs the tests: their host pins, users
+	// and keys end up in it, and what one run leaves there fails the next
+	// ("host pin error: localhost changed"). Harmless elsewhere: only the
+	// Windows home finder reads the variable.
+	localAppData, err := os.MkdirTemp("", "foks_test_localappdata_")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("LocalAppData", localAppData)
+
 	setup()
 	code := m.Run()
 	shutdown()
+	_ = os.RemoveAll(localAppData)
 	os.Exit(code)
 }
