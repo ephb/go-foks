@@ -405,11 +405,11 @@ func (k *Minder) PutFileFirst(
 		// doing this persistently to resume uploads after a restart, but for now,
 		// do the simple thing.
 		if !isFinal {
-			kvp.caches.upload[*fid] = &fileUploadState{
+			kvp.caches.putUpload(*fid, &fileUploadState{
 				fks: &fks,
 				off: proto.Offset(len(data)),
 				sz:  sz,
-			}
+			})
 		}
 		return nid, cacheFn, nil
 	}
@@ -430,7 +430,7 @@ func (k *Minder) PutFileChunk(
 		return nil
 	}
 
-	us := kvp.caches.upload[id]
+	us := kvp.caches.getUpload(id)
 	if us == nil {
 		return core.NotFoundError("upload state")
 	}
@@ -467,6 +467,11 @@ func (k *Minder) PutFileChunk(
 	})
 	if err != nil {
 		return err
+	}
+	if final {
+		// Nothing more comes for this file: without this the map grows
+		// by one entry per large file for as long as the agent runs.
+		kvp.caches.dropUpload(id)
 	}
 	end := time.Now()
 	dur := end.Sub(start)

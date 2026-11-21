@@ -76,7 +76,31 @@ type caches struct {
 	lfmd      *LargeFileMetadataCache
 	lfch      *LargeFileChunkCache
 	gitRefSet *GitRefSetCache
-	upload    map[proto.FileID]*fileUploadState
+
+	// uploadMu guards upload: one party's uploads run side by side
+	// (several git pushes, or files, through one Minder), and a plain
+	// map written by two of them at once is a fatal error.
+	uploadMu sync.Mutex
+	upload   map[proto.FileID]*fileUploadState
+}
+
+func (c *caches) putUpload(id proto.FileID, us *fileUploadState) {
+	c.uploadMu.Lock()
+	defer c.uploadMu.Unlock()
+	c.upload[id] = us
+}
+
+func (c *caches) getUpload(id proto.FileID) *fileUploadState {
+	c.uploadMu.Lock()
+	defer c.uploadMu.Unlock()
+	return c.upload[id]
+}
+
+// dropUpload forgets an upload whose last chunk the server took.
+func (c *caches) dropUpload(id proto.FileID) {
+	c.uploadMu.Lock()
+	defer c.uploadMu.Unlock()
+	delete(c.upload, id)
 }
 
 func newCaches(p proto.FQParty, settings libclient.CacheSettings) *caches {
