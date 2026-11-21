@@ -169,11 +169,12 @@ func TestKVGCUnlinkedFile(t *testing.T) {
 
 	require.NoError(t, f.kvm.Unlink(f.m, lcl.KVConfig{}, path))
 
-	// Unlinked a moment ago: kept (the grace covers upload-then-link).
+	// Unlinked a moment ago: kept (the grace covers upload-then-link),
+	// but no longer served by its ID (TestKVUnlinkedFileUnreadable).
 	f.gc(t)
 	require.Equal(t, gcRow{"active", 0, 4}, f.row(t, fid))
 	_, err := f.kvm.GetFileChunk(f.m, lcl.KVConfig{}, fid, 0)
-	require.NoError(t, err)
+	require.IsType(t, core.KVNoentError{}, err)
 
 	// Unlinked for longer than the grace: collected.
 	f.age(t, fid, 2*time.Hour)
@@ -469,8 +470,6 @@ func TestKVGCDryRunAndLimit(t *testing.T) {
 	require.Equal(t, rows[0], f.row(t, fids[0]))
 	require.Equal(t, rows[1], f.row(t, fids[1]))
 	require.Equal(t, before, f.usage(t))
-	_, err = f.kvm.GetFileChunk(f.m, lcl.KVConfig{}, fids[0], 0)
-	require.NoError(t, err)
 
 	// One file per pass: one of the two goes, then the other.
 	opts = gcTestOpts()

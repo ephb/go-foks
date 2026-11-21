@@ -674,7 +674,7 @@ func loadLargeFileMetadata(
 	*proto.LargeFileMetadata,
 	error,
 ) {
-	var v, ptkg, rt, vl int
+	var v, ptkg, rt, vl, refcount int
 	var keyBox []byte
 	var status string
 	fid, err := val.ToFileID()
@@ -685,14 +685,14 @@ func loadLargeFileMetadata(
 	err = db.QueryRow(
 		m.Ctx(),
 		`SELECT version, read_role_type, read_role_viz_level, ptk_gen, key_box,
-		    status
+		    status, refcount
 		FROM large_file
 		JOIN large_file_key USING(short_host_id, short_party_id, file_id)
 		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3
 		ORDER BY version DESC
 		LIMIT 1`,
 		int(m.ShortHostID()), pid.Shorten().ExportToDB(), fid.ExportToDB(),
-	).Scan(&v, &rt, &vl, &ptkg, &keyBox, &status)
+	).Scan(&v, &rt, &vl, &ptkg, &keyBox, &status, &refcount)
 	if err != nil && err == pgx.ErrNoRows {
 		return nil, core.NotFoundError("large file metadata")
 	}
@@ -728,6 +728,11 @@ func loadLargeFileMetadata(
 	case LargeFileStatusDead:
 		return nil, core.KVNoentError{}
 	case LargeFileStatusActive:
+		// Unlinked: gone for every reader (assertLinked).
+		err = assertLinked(m, db, pid, val, refcount)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, core.BadServerDataError("bad file status")
 	}
@@ -750,8 +755,8 @@ func loadLargeFileMetadata(
 }
 
 // loadLargeFileReadRole reads the read role of a large file's current version,
-// and the file's status, for callers that must authorize access without
-// loading the key box.
+// the file's status and its refcount, for callers that must authorize access
+// without loading the key box.
 func loadLargeFileReadRole(
 	m shared.MetaContext,
 	db *pgxpool.Conn,
@@ -760,36 +765,84 @@ func loadLargeFileReadRole(
 ) (
 	proto.Role,
 	LargeFileStatus,
+	int,
 	error,
 ) {
 	var ret proto.Role
-	var rt, vl int
+	var rt, vl, refcount int
 	var status string
 	err := db.QueryRow(
 		m.Ctx(),
-		`SELECT read_role_type, read_role_viz_level, status
+		`SELECT read_role_type, read_role_viz_level, status, refcount
 		FROM large_file_key
 		JOIN large_file USING(short_host_id, short_party_id, file_id)
 		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3
 		ORDER BY version DESC
 		LIMIT 1`,
 		int(m.ShortHostID()), pid.Shorten().ExportToDB(), fid.ExportToDB(),
-	).Scan(&rt, &vl, &status)
+	).Scan(&rt, &vl, &status, &refcount)
 	if err != nil && err == pgx.ErrNoRows {
-		return ret, LargeFileStatusNone, core.NotFoundError("large file key")
+		return ret, LargeFileStatusNone, 0, core.NotFoundError("large file key")
 	}
 	if err != nil {
-		return ret, LargeFileStatusNone, err
+		return ret, LargeFileStatusNone, 0, err
 	}
 	err = ret.ImportFromDB(rt, vl)
 	if err != nil {
-		return ret, LargeFileStatusNone, err
+		return ret, LargeFileStatusNone, 0, err
 	}
 	st, err := ParseLargeFileStatus(status)
 	if err != nil {
-		return ret, LargeFileStatusNone, err
+		return ret, LargeFileStatusNone, 0, err
 	}
-	return ret, st, nil
+	return ret, st, refcount, nil
+}
+
+// assertLinked refuses a node (large file, small file or symlink) that no
+// name links any more: an unlinked file is gone for every reader at once, not
+// only once the GC has collected it. Unlinking a name is how a file is
+// deleted (and an overwrite is how it is replaced); without this, anyone who
+// had kept the node's ID could go on reading it by ID until a collection
+// pass, which may never come (kv_store.gc is off by default, and keeps an
+// unlinked file for its grace period).
+//
+// refcount is the node's. At 0 it also checks that no live dirent points at
+// the node, as the GC does before it collects one: a refcount that drifted
+// must not make a linked file unreadable. That is one index lookup
+// (dirent_value_active_idx, patch p1), and only for unlinked nodes.
+//
+// A reader that resolved a name and then reads the file by ID can lose a
+// race with a concurrent overwrite or unlink of that name: it gets "no such
+// file", as it would for a file deleted a moment earlier. libkv's
+// cacheRaceLoop retries the first read of a path after its cache check, so a
+// stale cached name finds the new file. A file that is being uploaded is
+// linked after its first chunk (libkv putFile), and a file is not read
+// before that by anyone but its uploader, who has no need to.
+func assertLinked(
+	m shared.MetaContext,
+	rq shared.Querier,
+	pid proto.PartyID,
+	nid proto.KVNodeID,
+	refcount int,
+) error {
+	if refcount > 0 {
+		return nil
+	}
+	var linked bool
+	err := rq.QueryRow(
+		m.Ctx(),
+		`SELECT EXISTS(SELECT 1 FROM dirent
+		  WHERE short_host_id=$1 AND short_party_id=$2
+		    AND active AND value=$3)`,
+		int(m.ShortHostID()), pid.Shorten().ExportToDB(), nid.ExportToDB(),
+	).Scan(&linked)
+	if err != nil {
+		return err
+	}
+	if !linked {
+		return core.KVNoentError{}
+	}
+	return nil
 }
 
 func getNode(
@@ -826,7 +879,7 @@ func getChunk(
 	// ID, at any role. The chunk is sealed to the PTK at the file's read role,
 	// so this was not a plaintext leak; it disclosed existence, size and chunk
 	// layout, and left the whole gate to the crypto.
-	fileRole, st, err := loadLargeFileReadRole(m, db, pid, arg.Id)
+	fileRole, st, refcount, err := loadLargeFileReadRole(m, db, pid, arg.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -838,6 +891,14 @@ func getChunk(
 	// collected has no chunks left: say "no such file", not "chunk not found".
 	if st == LargeFileStatusDead {
 		return nil, core.KVNoentError{}
+	}
+	// Nor does an unlinked one serve its chunks, whoever kept its ID
+	// (assertLinked). A running upload is served as before.
+	if st == LargeFileStatusActive {
+		err = assertLinked(m, db, pid, arg.Id.KVNodeID(), refcount)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return lfe.Get(m, db, pid, arg.Id, arg.Offset)
 }
@@ -920,7 +981,7 @@ func mLoadSmallFilesOrSymlinks(
 
 	rows, err := db.Query(
 		m.Ctx(),
-		`SELECT ptk_gen, box, read_role_type, read_role_viz_level, node_id
+		`SELECT ptk_gen, box, read_role_type, read_role_viz_level, node_id, refcount
 		FROM small_file_or_symlink
 		WHERE short_host_id=$1 AND short_party_id=$2 AND node_id = ANY($3)`,
 		int(m.ShortHostID()), pid.Shorten().ExportToDB(), nodeIDs,
@@ -932,14 +993,15 @@ func mLoadSmallFilesOrSymlinks(
 	defer rows.Close()
 
 	tab := make(map[proto.KVNodeID]*proto.SmallFileBox)
+	var unlinked []proto.KVNodeID
 
 	for rows.Next() {
 		var g int
 		var box []byte
-		var rt, vl int
+		var rt, vl, refcount int
 		var nodeIdRaw []byte
 
-		err := rows.Scan(&g, &box, &rt, &vl, &nodeIdRaw)
+		err := rows.Scan(&g, &box, &rt, &vl, &nodeIdRaw, &refcount)
 		if err != nil {
 			return nil, err
 		}
@@ -972,7 +1034,29 @@ func mLoadSmallFilesOrSymlinks(
 		if err != nil {
 			return nil, err
 		}
+		if refcount <= 0 {
+			// Looked at once the rows are read (assertLinked queries).
+			unlinked = append(unlinked, key)
+		}
 		tab[key] = &item
+	}
+	err = rows.Err()
+	if err != nil {
+		return nil, err
+	}
+	rows.Close()
+	// After the role check, as for large files: an unlinked small file or
+	// symlink is not served (assertLinked). A single load says "no such
+	// file"; a batch leaves it out, as it does a node the caller can't read.
+	for _, key := range unlinked {
+		err = assertLinked(m, db, pid, key, 0)
+		if _, ok := err.(core.KVNoentError); ok && !failOnPermError {
+			delete(tab, key)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	ret := make([]*proto.SmallFileBox, 0, len(keys))
 	for _, v := range keys {
